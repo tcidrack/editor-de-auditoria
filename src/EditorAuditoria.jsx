@@ -1,9 +1,9 @@
-import { useState, useRef, useEffect, useReducer } from "react";
+import { useState, useRef, useEffect, useReducer, useMemo } from "react";
 import { flushSync } from "react-dom";
 import {
   FilePlus, Folder, Undo2, Trash2, Save, Download,
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
-  Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText,
+  Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -21,6 +21,110 @@ const LOGO_MAIDA =
 const hexA = (h, al) => {
   const n = parseInt(h.slice(1), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${al})`;
+};
+
+// ---- glosas ----
+// só duas cores, e elas carregam o significado: a calculadora classifica por elas.
+const COR_ADM = "#2148c0"; // azul  — glosa administrativa
+const COR_TEC = "#d92d20"; // vermelho — glosa técnica
+const CORES = [
+  { id: "adm", hex: COR_ADM, label: "Administrativa", title: "Glosa administrativa (azul)" },
+  { id: "tec", hex: COR_TEC, label: "Técnica", title: "Glosa técnica (vermelha)" },
+];
+const classeGlosa = (hex) => {
+  const h = String(hex || "").toLowerCase();
+  return h === COR_ADM ? "adm" : h === COR_TEC ? "tec" : null;
+};
+
+// glosa administrativa: a equipe sempre escreve "G <valor>".
+// exigir as 2 casas decimais é o que descarta código ("2401") e as próprias linhas
+// do fechamento ("Glosa Técnica: R$ 298,81") — senão o resumo entraria na soma.
+const RE_GLOSA = /^g\s*(?:r\$)?\s*((?:\d{1,3}(?:\.\d{3})+|\d+)),(\d{2})$/i;
+const valorGlosa = (txt) => {
+  const m = RE_GLOSA.exec(String(txt || "").trim());
+  return m ? parseFloat(m[1].replace(/\./g, "") + "." + m[2]) : null;
+};
+
+// valor monetário isolado, do jeito que o OCR devolve ("298,81", "1.019,57")
+const RE_MOEDA = /^\d{1,3}(?:\.\d{3})*,\d{2}$/;
+
+// "1.019,57" → 1019.57 (aceita também "1019.57" digitado com ponto)
+const numeroBR = (txt) => {
+  const s = String(txt ?? "").trim().replace(/[^\d.,-]/g, "");
+  if (!s) return null;
+  const n = s.includes(",")
+    ? parseFloat(s.replace(/\./g, "").replace(",", "."))
+    : parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
+const moeda = (n) =>
+  (n || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// varre um documento e devolve os itens e totais das duas glosas.
+// administrativa = caixas de texto azuis "G <valor>";
+// técnica = traços vermelhos com valor confirmado (qtd × unitário) + o que veio do PDF.
+const calcGlosas = (doc) => {
+  const adm = [], tec = [];
+  if (doc) {
+    for (const [pg, lista] of Object.entries(doc.annotations || {}))
+      for (const a of lista) {
+        const cls = classeGlosa(a.color);
+        if (cls === "adm" && a.type === "text") {
+          const v = valorGlosa(a.text);
+          if (v != null) adm.push({ tipo: "adm", pagina: +pg, valor: v, ann: a });
+        } else if (cls === "tec" && a.type === "pen" && a.glosa > 0) {
+          tec.push({ tipo: "tec", pagina: +pg, valor: a.glosa, qtd: a.glosaQtd, unit: a.glosaUnit, ann: a });
+        }
+      }
+    // itens gravados no PDF por uma etapa anterior da auditoria (ver PREFIXO_GLOSAS).
+    // não há contagem dupla: as marcações do arquivo recebido vêm achatadas, o app não
+    // as enxerga como anotações — só existem aqui.
+    for (const h of (doc.herdado && doc.herdado.tec) || [])
+      tec.push({ tipo: "tec", pagina: h.p, valor: h.v, qtd: h.q, unit: h.u, herdado: true });
+    for (const h of (doc.herdado && doc.herdado.adm) || [])
+      adm.push({ tipo: "adm", pagina: h.p, valor: h.v, herdado: true });
+  }
+  const soma = (l) => Math.round(l.reduce((s, i) => s + i.valor, 0) * 100) / 100;
+  const porPagina = (l) => l.sort((a, b) => a.pagina - b.pagina);
+  const totalAdm = soma(adm), totalTec = soma(tec);
+  const totalGlosado = Math.round((totalAdm + totalTec) * 100) / 100;
+  const totalConta = doc ? numeroBR(doc.totalConta) : null;
+  return {
+    adm: porPagina(adm), tec: porPagina(tec), totalAdm, totalTec, totalGlosado, totalConta,
+    valorApurado: totalConta == null ? null : Math.round((totalConta - totalGlosado) * 100) / 100,
+  };
+};
+
+// ---- passagem entre as etapas da auditoria ----
+// O técnico risca e salva; o analista abre o PDF já riscado. Como as marcações saem
+// achatadas no arquivo, o app não teria como somar a glosa técnica do colega — então ela
+// viaja junto, nas Keywords (campo padrão, que o pdf.js devolve de volta em info.Keywords).
+const PREFIXO_GLOSAS = "maida-glosas:";
+const gravarGlosas = (out, doc) => {
+  const g = calcGlosas(doc);
+  if (!g.tec.length && !g.adm.length && g.totalConta == null) return;
+  const payload = {
+    v: 1,
+    totalConta: g.totalConta,
+    tec: g.tec.map((i) => ({ p: i.pagina, q: i.qtd, u: i.unit, v: i.valor })),
+    adm: g.adm.map((i) => ({ p: i.pagina, v: i.valor })),
+  };
+  // o pdf-lib junta o array num único campo separado por espaço, e é assim que o pdf.js
+  // devolve — por isso a nossa entrada vai por último e o JSON sai sem espaços.
+  out.setKeywords([doc.keywordsOriginais || "", PREFIXO_GLOSAS + JSON.stringify(payload)]
+    .filter(Boolean));
+};
+// devolve { herdado, keywordsOriginais } a partir do que o pdf.js leu dos metadados.
+// keywordsOriginais é a string crua anterior à nossa entrada: preserva keywords de terceiros
+// (não dá para separá-las com segurança — o separador é espaço, que também aparece dentro delas).
+const lerGlosasDoPdf = (keywords) => {
+  const bruto = String(keywords || "");
+  const i = bruto.indexOf(PREFIXO_GLOSAS);
+  if (i < 0) return { herdado: null, keywordsOriginais: bruto.trim() };
+  let herdado = null;
+  try { herdado = JSON.parse(bruto.slice(i + PREFIXO_GLOSAS.length)); }
+  catch { /* PDF mexido por fora — segue sem herança */ }
+  return { herdado, keywordsOriginais: bruto.slice(0, i).trim() };
 };
 
 // ---- carimbos ----
@@ -536,6 +640,119 @@ const distToSeg = (p, a, b) => {
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 };
 
+// uma das duas linhas de total da calculadora
+function LinhaGlosa({ hex, nome, valor, n, nota }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="w-2.5 h-2.5 rounded-full shrink-0 self-center" style={{ background: hex }} />
+      <span className="flex-1 min-w-0">
+        <span className="truncate">{nome}</span>
+        <span className="block text-[10px] text-[var(--muted)]">
+          {n} {n === 1 ? "item" : "itens"}{nota ? ` · ${nota}` : ""}
+        </span>
+      </span>
+      <b className="font-mono tabular-nums">{moeda(valor)}</b>
+    </div>
+  );
+}
+
+// ---- calculadora de glosas (painel flutuante no canto superior direito) ----
+// soma sozinha enquanto o auditor marca, e monta o fechamento que hoje é digitado à mão.
+function CalculadoraGlosas({ g, totalConta, onTotalConta, onInserirResumo, onIrPara, onRemover }) {
+  const [aberto, setAberto] = useState(() => localStorage.getItem("calcAberta") !== "0");
+  const [itens, setItens] = useState(false);
+  const alterna = (v) => { setAberto(v); localStorage.setItem("calcAberta", v ? "1" : "0"); };
+
+  if (!aberto)
+    return (
+      <button onClick={() => alterna(true)} title="Abrir a calculadora de glosas"
+        className="absolute top-3 right-3 z-20 flex items-center gap-2 px-3 py-2 rounded-lg shadow-lg
+          text-sm font-semibold bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]
+          hover:bg-[var(--hover)]">
+        <Calculator className="w-4 h-4 text-[var(--accent)]" />
+        R$ {moeda(g.totalGlosado)}
+      </button>
+    );
+
+  const herdadosTec = g.tec.filter((i) => i.herdado).length;
+  const herdadosAdm = g.adm.filter((i) => i.herdado).length;
+
+  return (
+    <div className="absolute top-3 right-3 z-20 w-64 max-w-[calc(100%-1.5rem)] rounded-xl shadow-lg
+      bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] text-sm overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
+        <Calculator className="w-4 h-4 text-[var(--accent)]" />
+        <b className="flex-1 text-xs uppercase tracking-wide">Glosas</b>
+        <button onClick={() => alterna(false)} title="Recolher"
+          className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">–</button>
+      </div>
+
+      <div className="px-3 py-2.5 flex flex-col gap-2">
+        <LinhaGlosa hex={COR_ADM} nome="Administrativa" valor={g.totalAdm} n={g.adm.length}
+          nota={herdadosAdm ? `${herdadosAdm} do PDF` : ""} />
+        <LinhaGlosa hex={COR_TEC} nome="Técnica" valor={g.totalTec} n={g.tec.length}
+          nota={herdadosTec ? `${herdadosTec} do PDF` : ""} />
+
+        <div className="border-t border-[var(--border)] pt-2 flex items-baseline gap-2">
+          <span className="flex-1">Total glosado</span>
+          <b className="font-mono tabular-nums text-[var(--accent)]">{moeda(g.totalGlosado)}</b>
+        </div>
+
+        <label className="flex items-center gap-2">
+          <span className="flex-1 text-xs text-[var(--muted)]">Total da conta</span>
+          <input value={totalConta || ""} onChange={(e) => onTotalConta(e.target.value)}
+            placeholder="0,00" inputMode="decimal" title="Total da conta, para calcular o valor apurado"
+            className="w-24 px-1.5 py-1 rounded-md text-right font-mono text-xs
+              border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+              focus:outline-none focus:border-[var(--accent)]" />
+        </label>
+
+        {g.valorApurado != null && (
+          <div className="flex items-baseline gap-2">
+            <span className="flex-1">Valor apurado</span>
+            <b className="font-mono tabular-nums">{moeda(g.valorApurado)}</b>
+          </div>
+        )}
+
+        <button onClick={onInserirResumo}
+          className="mt-1 w-full px-2 py-1.5 rounded-md text-xs font-semibold
+            bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+          Inserir resumo na página
+        </button>
+
+        <button onClick={() => setItens(!itens)}
+          className="text-xs text-[var(--muted)] hover:text-[var(--text)] text-left">
+          {itens ? "ocultar itens ▴" : "ver itens ▾"}
+        </button>
+      </div>
+
+      {itens && (
+        <div className="max-h-56 overflow-auto border-t border-[var(--border)] maida-scroll">
+          {!g.adm.length && !g.tec.length && (
+            <div className="px-3 py-3 text-xs text-[var(--muted)]">Nenhuma glosa ainda.</div>
+          )}
+          {[...g.tec, ...g.adm].map((i, k) => (
+            <div key={k} className="flex items-center gap-2 px-3 py-1.5 text-xs
+              border-b border-[var(--border)] last:border-0 hover:bg-[var(--hover)]">
+              <span className="w-2 h-2 rounded-full shrink-0"
+                style={{ background: i.tipo === "adm" ? COR_ADM : COR_TEC }} />
+              <button onClick={() => onIrPara(i.pagina)} title="Ir para a página"
+                className="flex-1 text-left text-[var(--muted)] hover:text-[var(--text)] truncate">
+                pág. {i.pagina}
+                {i.qtd ? <span className="ml-1">({moeda(i.qtd).replace(",00", "")} × {moeda(i.unit)})</span> : null}
+                {i.herdado ? <span className="ml-1 opacity-70">· do PDF</span> : null}
+              </button>
+              <b className="font-mono tabular-nums">{moeda(i.valor)}</b>
+              <button onClick={() => onRemover(i)} title="Tirar da conta (não apaga a marcação)"
+                className="px-1 rounded text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EditorAuditoria() {
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
   const [loadErr] = useState("");
@@ -550,7 +767,7 @@ export default function EditorAuditoria() {
   const [pageInput, setPageInput] = useState("1"); // campo "ir para página" do rodapé
   const [scale, setScale] = useState(1.3);
   const [tool, setTool] = useState("pen");
-  const [color, setColor] = useState("#d92d20");
+  const [color, setColor] = useState(COR_TEC);
   const [thickness, setThickness] = useState(2);
   const [checkSymbol, setCheckSymbol] = useState("check"); // símbolo ativo: "check" | "cross"
   const [saving, setSaving] = useState(false);
@@ -565,13 +782,14 @@ export default function EditorAuditoria() {
   const [selectedId, setSelectedId] = useState(null);
   const [ocr, setOcr] = useState(null); // leitura de código: { x, y, w, h, loading, text, err }
   const [ocrHold, setOcrHold] = useState(false); // mouse/foco no balão: pausa o fechamento
+  const [glosaTec, setGlosaTec] = useState(null); // balão de confirmação da glosa técnica
   const textSeq = useRef(0);
   const editOrig = useRef("");
-  const [, tick] = useReducer((x) => x + 1, 0);
+  const [rev, tick] = useReducer((x) => x + 1, 0); // rev também serve de dep p/ os memos
 
   // limpa edição/seleção ao trocar de documento ou página
   useEffect(() => {
-    setEditingId(null); setSelectedId(null); setOcr(null); setOcrHold(false);
+    setEditingId(null); setSelectedId(null); setOcr(null); setOcrHold(false); setGlosaTec(null);
   }, [activeId, page]);
 
   // mantém o campo do rodapé em sincronia quando a página muda por fora (setas, troca de doc)
@@ -595,6 +813,13 @@ export default function EditorAuditoria() {
   const pinch = useRef(null);   // estado da pinça (2 dedos)
 
   const getActive = () => store.current.docs.find((d) => d.id === activeId);
+
+  // ---- calculadora de glosas ----
+  // recalcula a cada render: o tick() que toda mutação já dispara faz os totais subirem
+  // enquanto o auditor ainda está digitando dentro da caixa de texto.
+  const glosas = useMemo(
+    () => calcGlosas(store.current.docs.find((d) => d.id === activeId)),
+    [activeId, rev]);
 
   // ferramentas de desenho/marcação: enquanto ativas, as caixas DOM ficam não-interativas
   const isDrawTool = ["pen", "line", "highlight", "check", "eraser", "ocr"].includes(tool);
@@ -653,6 +878,14 @@ export default function EditorAuditoria() {
         // isEvalSupported:false → mitiga GHSA-wgrm-67xf-hhpq (exec. de JS em PDF malicioso)
         doc.pdfDoc = await pdfjsLib.getDocument({ data: doc.bytes.slice(0), isEvalSupported: false }).promise;
         doc.numPages = doc.pdfDoc.numPages;
+        // glosas deixadas por uma etapa anterior da auditoria (ver gravarGlosas)
+        try {
+          const { info } = await doc.pdfDoc.getMetadata();
+          const { herdado, keywordsOriginais } = lerGlosasDoPdf(info && info.Keywords);
+          doc.herdado = herdado; doc.keywordsOriginais = keywordsOriginais;
+          if (herdado && herdado.totalConta != null && !doc.totalConta)
+            doc.totalConta = moeda(herdado.totalConta);
+        } catch { /* PDF sem metadados legíveis — segue sem herança */ }
         tick();
       }
       const pageObj = await doc.pdfDoc.getPage(page);
@@ -889,10 +1122,14 @@ export default function EditorAuditoria() {
     if (tool === "pen") {
       const pts = penPts.current; penPts.current = null;
       if (pts && pts.length > 1) {
-        (doc.annotations[page] = doc.annotations[page] || []).push({
-          type: "pen", points: pts, color, thickness,
-        });
+        const ann = { type: "pen", points: pts, color, thickness };
+        (doc.annotations[page] = doc.annotations[page] || []).push(ann);
         doc.saved = false; redo.current = []; tick();
+        // riscou de vermelho na horizontal → provável corte de quantidade: pergunta o valor.
+        // rabisco curto (marca solta, seta, círculo) não dispara.
+        const xs = pts.map((q) => q.x);
+        if (classeGlosa(color) === "tec" && Math.max(...xs) - Math.min(...xs) >= 8)
+          lerGlosaTecnica(ann);
       }
       drawOverlay();
       return;
@@ -962,38 +1199,52 @@ export default function EditorAuditoria() {
     return out;
   };
 
+  // lê uma área da página e devolve { texto, palavras } — as palavras trazem o x em pontos
+  // do documento, que é o que permite saber qual coluna da tabela cada número ocupa.
+  const lerRegiaoTexto = async (r) => {
+    const doc = getActive(); if (!doc || !doc.pdfDoc) return null;
+    const pageObj = await doc.pdfDoc.getPage(page);
+    // Recorte em alta resolução: renderiza a página inteira deslocada, num canvas do
+    // tamanho da área (as coords do app já são pontos do PDF — ver toDoc).
+    // A margem extra é essencial: o tesseract erra muito quando o texto encosta na borda
+    // do recorte (medido neste PDF: 12/20 sem margem → 18/20 com margem + filtro abaixo).
+    const S = 6;   // resolução do recorte (S=6 saiu bem melhor que S=4 nos testes)
+    const MG = 8;  // margem em pontos ao redor da seleção
+    const vp = pageObj.getViewport({ scale: S });
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round((r.w + MG * 2) * S));
+    cv.height = Math.max(1, Math.round((r.h + MG * 2) * S));
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+    // renderiza o PDF original: as marcações do editor não entram e não atrapalham a leitura
+    await pageObj.render({
+      canvasContext: ctx, viewport: vp,
+      transform: [1, 0, 0, 1, -(r.x - MG) * S, -(r.y - MG) * S],
+    }).promise;
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(cv, {}, { blocks: true, text: true });
+    // a margem entra na leitura mas não no resultado: fica só o que o usuário selecionou
+    const X0 = MG * S, Y0 = MG * S, X1 = (MG + r.w) * S, Y1 = (MG + r.h) * S;
+    const dentro = ocrPalavras(data).filter((p) => {
+      const cx = (p.bbox.x0 + p.bbox.x1) / 2, cy = (p.bbox.y0 + p.bbox.y1) / 2;
+      return cx >= X0 && cx <= X1 && cy >= Y0 && cy <= Y1;
+    });
+    const palavras = dentro.map((p) => ({
+      text: p.text,
+      x0: r.x - MG + p.bbox.x0 / S,   // de volta para pontos do documento
+      x1: r.x - MG + p.bbox.x1 / S,
+    }));
+    const bruto = dentro.length ? dentro.map((p) => p.text).join(" ") : data.text || "";
+    return { texto: bruto.replace(/\s+/g, " ").trim(), palavras };
+  };
+
   const readRegion = async (r) => {
     const doc = getActive(); if (!doc || !doc.pdfDoc) return;
     const primeira = !ocrWorker.current;
     setOcr({ ...r, loading: true, primeira, text: "", err: "" });
     try {
-      const pageObj = await doc.pdfDoc.getPage(page);
-      // Recorte em alta resolução: renderiza a página inteira deslocada, num canvas do
-      // tamanho da área (as coords do app já são pontos do PDF — ver toDoc).
-      // A margem extra é essencial: o tesseract erra muito quando o texto encosta na borda
-      // do recorte (medido neste PDF: 12/20 sem margem → 18/20 com margem + filtro abaixo).
-      const S = 6;   // resolução do recorte (S=6 saiu bem melhor que S=4 nos testes)
-      const MG = 8;  // margem em pontos ao redor da seleção
-      const vp = pageObj.getViewport({ scale: S });
-      const cv = document.createElement("canvas");
-      cv.width = Math.max(1, Math.round((r.w + MG * 2) * S));
-      cv.height = Math.max(1, Math.round((r.h + MG * 2) * S));
-      const ctx = cv.getContext("2d");
-      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
-      await pageObj.render({
-        canvasContext: ctx, viewport: vp,
-        transform: [1, 0, 0, 1, -(r.x - MG) * S, -(r.y - MG) * S],
-      }).promise;
-      const worker = await getOcrWorker();
-      const { data } = await worker.recognize(cv, {}, { blocks: true, text: true });
-      // a margem entra na leitura mas não no resultado: fica só o que o usuário selecionou
-      const X0 = MG * S, Y0 = MG * S, X1 = (MG + r.w) * S, Y1 = (MG + r.h) * S;
-      const dentro = ocrPalavras(data).filter((p) => {
-        const cx = (p.bbox.x0 + p.bbox.x1) / 2, cy = (p.bbox.y0 + p.bbox.y1) / 2;
-        return cx >= X0 && cx <= X1 && cy >= Y0 && cy <= Y1;
-      });
-      const bruto = dentro.length ? dentro.map((p) => p.text).join(" ") : data.text || "";
-      const texto = bruto.replace(/\s+/g, " ").trim();
+      const lido = await lerRegiaoTexto(r);
+      const texto = lido ? lido.texto : "";
       if (!texto) {
         setOcr((o) => (o ? { ...o, loading: false, err: "Não consegui ler essa área — tente selecionar mais perto do código." } : o));
         return;
@@ -1003,6 +1254,46 @@ export default function EditorAuditoria() {
     } catch {
       setOcr((o) => (o ? { ...o, loading: false, err: "Falha ao ler a área. Tente de novo." } : o));
     }
+  };
+
+  // ---- glosa técnica: o auditor risca a QUANTIDADE; o valor sai de qtd × Vl Unitário ----
+  // o traço cobre a célula Qtde e o Vl Unitário fica à direita, fora dele — por isso a
+  // leitura pega a faixa da linha inteira, não a caixa do traço.
+  const lerGlosaTecnica = async (ann) => {
+    const pts = ann.points || [];
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs);
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const faixa = { x: Math.max(0, x0 - 10), y: Math.max(0, cy - 7), w: (x1 - x0) + 130, h: 14 };
+    const primeira = !ocrWorker.current;
+    setGlosaTec({ ann, ...faixa, loading: true, primeira, qtd: "", unit: "", err: "" });
+    try {
+      const lido = await lerRegiaoTexto(faixa);
+      const palavras = (lido && lido.palavras) || [];
+      // qtde: inteiro sob o traço | unitário: 1º valor monetário à direita do fim do traço
+      const sob = palavras.find((p) => /^\d{1,4}$/.test(p.text) && p.x1 >= x0 - 4 && p.x0 <= x1 + 4);
+      const unit = palavras.find((p) => RE_MOEDA.test(p.text) && p.x0 >= x1 - 6);
+      setGlosaTec((g) => (g && g.ann === ann ? {
+        ...g, loading: false,
+        qtd: sob ? sob.text : "1",
+        unit: unit ? unit.text : "",
+      } : g));
+    } catch {
+      setGlosaTec((g) => (g && g.ann === ann
+        ? { ...g, loading: false, qtd: "1", unit: "", err: "Não consegui ler a linha — preencha à mão." }
+        : g));
+    }
+  };
+  // confirma a glosa gravando o valor na própria anotação: assim borracha e Ctrl+Z
+  // levam o traço e o valor juntos, e o buildPdf ignora esses campos ao exportar.
+  const confirmarGlosaTec = () => {
+    const g = glosaTec; if (!g) return;
+    const qtd = numeroBR(g.qtd), unit = numeroBR(g.unit);
+    if (!(qtd > 0) || !(unit > 0)) return;
+    g.ann.glosaQtd = qtd; g.ann.glosaUnit = unit;
+    g.ann.glosa = Math.round(qtd * unit * 100) / 100;
+    const d = getActive(); if (d) d.saved = false;
+    setGlosaTec(null); tick();
   };
 
   // ---- linha-guia horizontal (1 clique atravessa a largura da página) ----
@@ -1109,6 +1400,51 @@ export default function EditorAuditoria() {
     getActive().saved = false;
     setEditingId(null); setTool("select"); tick();
   };
+  // ---- fechamento da conta (as 4 linhas que o analista escreve no fim) ----
+  const setTotalConta = (txt) => {
+    const doc = getActive(); if (!doc) return;
+    doc.totalConta = txt; tick();
+  };
+  // tira um item da conta sem apagar a marcação do PDF (correção de leitura errada do OCR)
+  const removerGlosa = (item) => {
+    const doc = getActive(); if (!doc) return;
+    if (item.ann) { delete item.ann.glosa; delete item.ann.glosaQtd; delete item.ann.glosaUnit; }
+    else if (doc.herdado) {
+      const alvo = item.tipo === "adm" ? "adm" : "tec";
+      const lista = doc.herdado[alvo] || [];
+      const i = lista.findIndex((h) => h.p === item.pagina && h.v === item.valor);
+      if (i >= 0) lista.splice(i, 1);
+    }
+    doc.saved = false; tick();
+  };
+  const inserirResumo = () => {
+    const doc = getActive(); if (!doc) return;
+    const linhas = [
+      `Glosa Técnica: R$ ${moeda(glosas.totalTec)}`,
+      `Glosa Administrativa: R$ ${moeda(glosas.totalAdm)}`,
+      `Valor Glosado: R$ ${moeda(glosas.totalGlosado)}`,
+    ];
+    if (glosas.valorApurado != null)
+      linhas.push(`Valor Apurado: R$ ${moeda(glosas.valorApurado)}`);
+    // mesmo tamanho de fonte do texto avulso; nasce onde o analista está olhando
+    const size = Math.max(9, Math.min(22, Math.round(15 / scale)));
+    const m = mainRef.current;
+    const x = m ? (m.scrollLeft + 40) / scale : 40;
+    const y = m ? (m.scrollTop + 40) / scale : 40;
+    const lista = (doc.annotations[page] = doc.annotations[page] || []);
+    let primeiro = null;
+    linhas.forEach((text, i) => {
+      const id = "t" + ++textSeq.current;
+      if (!primeiro) primeiro = id;
+      lista.push({
+        type: "text", id, x: Math.max(0, x), y: Math.max(0, y + i * size * 1.6),
+        text, size, color: COR_ADM, w: 120, h: 24,
+      });
+    });
+    doc.saved = false; redo.current = [];
+    setTool("select"); setSelectedId(primeiro); tick();
+  };
+
   // duplica qualquer anotação já inserida (texto ou carimbo)
   const duplicateAnn = (id) => {
     const doc = getActive(); const a = findText(id);
@@ -1166,6 +1502,9 @@ export default function EditorAuditoria() {
       store.current.docs.push({
         id: ++seq.current, name: f.name, bytes, pdfDoc: null,
         numPages: 0, page: 1, annotations: {}, saved: false,
+        totalConta: "",        // preenchido na calculadora (ou herdado do PDF)
+        herdado: null,         // glosas da etapa anterior, lidas dos metadados
+        keywordsOriginais: "", // keywords que o PDF já trazia — preservadas ao exportar
       });
     }
     tick();
@@ -1323,6 +1662,7 @@ export default function EditorAuditoria() {
         }
       }
     }
+    gravarGlosas(out, d);
     return out.save();
   };
   const outName = (n) => n.replace(/\.pdf$/i, "") + " - AUDITADO.pdf";
@@ -1430,12 +1770,20 @@ export default function EditorAuditoria() {
           </button>
         </div>
 
+        {/* tipo de glosa — a cor É a classificação, por isso só estas duas */}
         <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
-          <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Cor</span>
-          <label title="Escolher cor"
-            className="w-8 h-8 rounded-md border flex items-center justify-center overflow-hidden ring-2 ring-[var(--accent)] border-[var(--accent)]">
-            <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="color-input" />
-          </label>
+          <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Glosa</span>
+          {CORES.map(({ id, hex, label, title }) => (
+            <button key={id} onClick={() => setColor(hex)} title={title}
+              className={"flex items-center gap-1.5 px-2 md:px-2.5 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
+                (color === hex
+                  ? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
+                  : "bg-[var(--surface)] border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]")}>
+              <span className="w-3.5 h-3.5 rounded-full border border-black/20 shrink-0"
+                style={{ background: hex }} />
+              <span className="hidden sm:inline">{label}</span>
+            </button>
+          ))}
         </div>
 
         <div className="flex shrink-0 items-center gap-2 pr-2 md:pr-3 border-r border-[var(--border)]">
@@ -1695,10 +2043,93 @@ export default function EditorAuditoria() {
                     </div>
                   </div>
                 )}
+                {/* confirmação da glosa técnica (qtd cortada × valor unitário) */}
+                {glosaTec && (
+                  <div
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") { e.stopPropagation(); setGlosaTec(null); }
+                      if (e.key === "Enter") { e.stopPropagation(); confirmarGlosaTec(); }
+                    }}
+                    style={{
+                      position: "absolute", zIndex: 6, pointerEvents: "auto",
+                      left: glosaTec.x * scale, top: (glosaTec.y + glosaTec.h) * scale + 8,
+                      lineHeight: 1.3,
+                    }}>
+                    <div className="p-2.5 rounded-lg shadow-lg text-sm min-w-[15rem]
+                      bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]"
+                      style={{ borderLeft: `4px solid ${COR_TEC}` }}>
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <b className="text-xs uppercase tracking-wide text-[var(--muted)]">Glosa técnica</b>
+                        <button onClick={() => setGlosaTec(null)} title="Fechar"
+                          className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+                      </div>
+                      {glosaTec.loading ? (
+                        <div className="px-1 py-1 text-[var(--muted)]">
+                          {glosaTec.primeira ? "Preparando leitor…" : "Lendo a linha…"}
+                        </div>
+                      ) : (
+                        <>
+                          {glosaTec.err && (
+                            <div className="mb-2 text-xs text-[var(--muted)]">{glosaTec.err}</div>
+                          )}
+                          <div className="flex items-center gap-1.5">
+                            <label className="flex flex-col gap-0.5">
+                              <span className="text-[10px] uppercase text-[var(--muted)]">Qtde</span>
+                              <input value={glosaTec.qtd} autoFocus
+                                onFocus={(e) => e.target.select()}
+                                onChange={(e) => setGlosaTec((g) => ({ ...g, qtd: e.target.value }))}
+                                className="w-14 px-1.5 py-1 rounded-md text-right font-mono
+                                  border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                                  focus:outline-none focus:border-[var(--accent)]" />
+                            </label>
+                            <span className="text-[var(--muted)] self-end pb-1.5">×</span>
+                            <label className="flex flex-col gap-0.5">
+                              <span className="text-[10px] uppercase text-[var(--muted)]">Vl unitário</span>
+                              <input value={glosaTec.unit}
+                                onFocus={(e) => e.target.select()}
+                                onChange={(e) => setGlosaTec((g) => ({ ...g, unit: e.target.value }))}
+                                className="w-24 px-1.5 py-1 rounded-md text-right font-mono
+                                  border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                                  focus:outline-none focus:border-[var(--accent)]" />
+                            </label>
+                          </div>
+                          <div className="mt-2 text-right font-semibold" style={{ color: COR_TEC }}>
+                            = R$ {moeda((numeroBR(glosaTec.qtd) || 0) * (numeroBR(glosaTec.unit) || 0))}
+                          </div>
+                          <div className="flex items-center gap-1.5 mt-2">
+                            <button onClick={confirmarGlosaTec}
+                              disabled={!(numeroBR(glosaTec.qtd) > 0 && numeroBR(glosaTec.unit) > 0)}
+                              className="flex-1 px-2 py-1.5 rounded-md text-xs font-semibold
+                                bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40">
+                              Glosar
+                            </button>
+                            <button onClick={() => setGlosaTec(null)}
+                              className="px-2 py-1.5 rounded-md text-xs font-semibold
+                                border border-[var(--border)] text-[var(--muted)] hover:bg-[var(--hover)]">
+                              Não é glosa
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
         </main>
+
+        {/* calculadora de glosas — flutua sobre o PDF, sem cobrir a toolbar */}
+        {active && (
+          <CalculadoraGlosas
+            g={glosas}
+            totalConta={active.totalConta}
+            onTotalConta={setTotalConta}
+            onInserirResumo={inserirResumo}
+            onIrPara={goToPage}
+            onRemover={removerGlosa}
+          />
+        )}
       </div>
 
       {/* diálogo customizado (alert/confirm) */}
