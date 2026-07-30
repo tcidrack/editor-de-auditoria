@@ -12,6 +12,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import { PDFDocument, rgb, StandardFonts, LineCapStyle } from "pdf-lib";
 import JSZip from "jszip";
+import * as rascunho from "./rascunho";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const LOGO_MAIDA =
@@ -126,6 +127,9 @@ const lerGlosasDoPdf = (keywords) => {
   catch { /* PDF mexido por fora — segue sem herança */ }
   return { herdado, keywordsOriginais: bruto.slice(0, i).trim() };
 };
+
+// conversão das anotações para o rascunho — ver src/rascunho.js
+const { serializarAnns, restaurarAnns, dataUrlParaBlob, blobParaDataUrl, hashesDosRegistros } = rascunho;
 
 // ---- carimbos ----
 // nome do dono a partir do arquivo: "carimbo-aline-batista.png" → "Aline Batista"
@@ -777,7 +781,13 @@ export default function EditorAuditoria() {
   const [dialog, setDialog] = useState(null); // alert/confirm customizado
   const showAlert = (title, message) => setDialog({ title, message, alert: true });
   const showConfirm = (title, message, onConfirm, opts = {}) =>
-    setDialog({ title, message, onConfirm, confirmText: opts.confirmText || "Confirmar" });
+    setDialog({
+      title, message, onConfirm,
+      confirmText: opts.confirmText || "Confirmar",
+      cancelText: opts.cancelText || "Cancelar",
+      onCancel: opts.onCancel,        // recusar pode ter consequência (descartar rascunho)
+      semBackdrop: opts.semBackdrop,  // clique fora não pode decidir por engano
+    });
   const [editingId, setEditingId] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [ocr, setOcr] = useState(null); // leitura de código: { x, y, w, h, loading, text, err }
@@ -786,6 +796,14 @@ export default function EditorAuditoria() {
   const textSeq = useRef(0);
   const editOrig = useRef("");
   const [rev, tick] = useReducer((x) => x + 1, 0); // rev também serve de dep p/ os memos
+
+  // ---- rascunho automático ----
+  const persistir = useRef(false);   // desligado se o IndexedDB falhou ou outra aba é a dona
+  const bootFeito = useRef(false);   // <StrictMode> monta 2× em dev: o boot roda uma só vez
+  const autosave = useRef({ timer: 0, ultimo: 0 });
+  const ordemSeq = useRef(0);        // ordem da fila, estável entre sessões
+  const avisouFalha = useRef(false); // o aviso de falha aparece no máximo uma vez
+  const imgsGravadas = useRef(new Set()); // hashes de carimbo já no banco
 
   // limpa edição/seleção ao trocar de documento ou página
   useEffect(() => {
@@ -813,6 +831,43 @@ export default function EditorAuditoria() {
   const pinch = useRef(null);   // estado da pinça (2 dedos)
 
   const getActive = () => store.current.docs.find((d) => d.id === activeId);
+
+  // ---- rascunho: gravação de um documento ----
+  // monta o registro leve (sem bytes, sem pdfDoc) e manda para o IndexedDB.
+  // pdfDoc é um PDFDocumentProxy com worker e referências circulares — o structured
+  // clone do IndexedDB falharia se ele entrasse aqui.
+  const salvarRascunho = (doc, pg) => {
+    if (!persistir.current || !doc || !doc.key) return;
+    try {
+      // O binário vai uma vez só, mas a garantia fica aqui (e não em addFiles) para cobrir
+      // dois casos em que o registro sobraria sem arquivo — e sumiria sem aviso na volta:
+      // arquivos abertos antes do boot terminar, e edição retomada depois de exportar.
+      if (!doc.binarioGravado && doc.bytes) {
+        if (doc.bytes.byteLength > rascunho.LIMITE_ARQUIVO) doc.semBinario = true;
+        else {
+          doc.binarioGravado = true;
+          rascunho.salvarPdf(doc.key, new Blob([doc.bytes], { type: "application/pdf" }));
+        }
+      }
+      const imagens = new Map();
+      const annotations = serializarAnns(doc.annotations, imagens);
+      // a imagem do carimbo vai uma vez por sessão, não a cada gravação: converter o
+      // base64 e reescrever a cada 2s seria caro à toa (a imagem nunca muda).
+      for (const [h, url] of imagens) {
+        if (imgsGravadas.current.has(h)) continue;
+        const b = dataUrlParaBlob(url);
+        if (b) { imgsGravadas.current.add(h); rascunho.salvarImagem(h, b); }
+      }
+      rascunho.salvarSessao({
+        key: doc.key, nome: doc.name, ordem: doc.ordem || 0,
+        page: pg || doc.page || 1, numPages: doc.numPages || 0,
+        totalConta: doc.totalConta || "", herdado: doc.herdado || null,
+        keywordsOriginais: doc.keywordsOriginais || "",
+        metaLida: !!doc.metaLida, semBinario: !!doc.semBinario,
+        annotations, atualizadoEm: Date.now(),
+      });
+    } catch { /* gravar rascunho nunca pode interromper a marcação em andamento */ }
+  };
 
   // ---- calculadora de glosas ----
   // recalcula a cada render: o tick() que toda mutação já dispara faz os totais subirem
@@ -878,14 +933,20 @@ export default function EditorAuditoria() {
         // isEvalSupported:false → mitiga GHSA-wgrm-67xf-hhpq (exec. de JS em PDF malicioso)
         doc.pdfDoc = await pdfjsLib.getDocument({ data: doc.bytes.slice(0), isEvalSupported: false }).promise;
         doc.numPages = doc.pdfDoc.numPages;
-        // glosas deixadas por uma etapa anterior da auditoria (ver gravarGlosas)
-        try {
-          const { info } = await doc.pdfDoc.getMetadata();
-          const { herdado, keywordsOriginais } = lerGlosasDoPdf(info && info.Keywords);
-          doc.herdado = herdado; doc.keywordsOriginais = keywordsOriginais;
-          if (herdado && herdado.totalConta != null && !doc.totalConta)
-            doc.totalConta = moeda(herdado.totalConta);
-        } catch { /* PDF sem metadados legíveis — segue sem herança */ }
+        // glosas deixadas por uma etapa anterior da auditoria (ver gravarGlosas).
+        // Só na primeira abertura: num documento restaurado do rascunho, doc.herdado já
+        // reflete o que o auditor mexeu (removerGlosa dá splice nele) e reler os
+        // metadados aqui faria os itens removidos voltarem sozinhos.
+        if (!doc.metaLida) {
+          try {
+            const { info } = await doc.pdfDoc.getMetadata();
+            const { herdado, keywordsOriginais } = lerGlosasDoPdf(info && info.Keywords);
+            doc.herdado = herdado; doc.keywordsOriginais = keywordsOriginais;
+            if (herdado && herdado.totalConta != null && !doc.totalConta)
+              doc.totalConta = moeda(herdado.totalConta);
+          } catch { /* PDF sem metadados legíveis — segue sem herança */ }
+          doc.metaLida = true;
+        }
         tick();
       }
       const pageObj = await doc.pdfDoc.getPage(page);
@@ -918,6 +979,26 @@ export default function EditorAuditoria() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, activeId, page, scale]);
+
+  // ---- rascunho: gravação contínua ----
+  // Toda mutação passa por tick() (que incrementa rev), então um efeito só cobre tudo.
+  // `page` também é dep porque prevPage/nextPage/goToPage mudam d.page sem chamar tick().
+  useEffect(() => {
+    if (!persistir.current) return;
+    const d = getActive();
+    if (!d || !d.key || d.saved) return; // exportado não tem rascunho (ver doSaveOne)
+    const st = autosave.current;
+    const grava = () => { st.ultimo = Date.now(); salvarRascunho(d, page); };
+    // teto: o cleanup abaixo cancela o timer a cada tick, então uma marcação contínua
+    // adiaria a gravação para sempre. Com o teto, no máximo ~2s de trabalho ficam
+    // sem checkpoint — que é o que de fato se perde numa queda de energia (não há
+    // evento de fechamento nesse cenário).
+    if (Date.now() - st.ultimo > 2000) { grava(); return; }
+    clearTimeout(st.timer);
+    st.timer = setTimeout(grava, 500);
+    return () => clearTimeout(st.timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rev, activeId, page]);
 
   // ---- overlay ----
   const paint = (ctx, a) => {
@@ -1403,7 +1484,7 @@ export default function EditorAuditoria() {
   // ---- fechamento da conta (as 4 linhas que o analista escreve no fim) ----
   const setTotalConta = (txt) => {
     const doc = getActive(); if (!doc) return;
-    doc.totalConta = txt; tick();
+    doc.totalConta = txt; doc.saved = false; tick();
   };
   // tira um item da conta sem apagar a marcação do PDF (correção de leitura errada do OCR)
   const removerGlosa = (item) => {
@@ -1494,24 +1575,202 @@ export default function EditorAuditoria() {
     localStorage.setItem("carimbos", JSON.stringify(lista));
   };
 
+  // ---- rascunho: retomada da sessão ----
+  // Só uma aba pode ser dona do rascunho. Sem isso, duas abas abertas escreveriam nos
+  // mesmos registros e a última gravação apagaria as marcações da outra — em silêncio,
+  // que é o pior modo de falha possível aqui.
+  const canal = useRef(null);
+  const reivindicarAba = () => new Promise((resolve) => {
+    let livre = true;
+    try {
+      if (!globalThis.BroadcastChannel) return resolve(true); // sem suporte: segue sozinho
+      const ch = new BroadcastChannel("editor-auditoria");
+      canal.current = ch;
+      ch.onmessage = (e) => {
+        const m = e.data || {};
+        if (m.tipo === "ocupado") livre = false;
+        // já sou a dona: aviso a recém-chegada para ela não gravar por cima
+        else if (m.tipo === "ola" && persistir.current) ch.postMessage({ tipo: "ocupado" });
+      };
+      ch.postMessage({ tipo: "ola" });
+      setTimeout(() => resolve(livre), 250);
+      window.addEventListener("pagehide", () => { try { ch.close(); } catch { /* já fechado */ } });
+    } catch { resolve(true); }
+  });
+
+  // remonta um documento a partir do registro gravado
+  const docDoRegistro = async (reg, cacheImg) => {
+    const blob = reg.semBinario ? null : await rascunho.lerPdf(reg.key);
+    if (!blob) return null; // sem o PDF não há o que restaurar
+    const bytes = await blob.arrayBuffer();
+    return {
+      id: ++seq.current, key: reg.key, name: reg.nome, bytes, pdfDoc: null,
+      numPages: reg.numPages || 0, page: reg.page || 1,
+      annotations: await restaurarAnns(reg.annotations, cacheImg),
+      saved: false, // se há rascunho, é porque não foi exportado
+      totalConta: reg.totalConta || "",
+      herdado: reg.herdado || null,
+      keywordsOriginais: reg.keywordsOriginais || "",
+      metaLida: !!reg.metaLida, // não relê as Keywords: doc.herdado já está do jeito certo
+      ordem: reg.ordem || 0,
+      semBinario: false,
+      binarioGravado: true, // veio da base: o arquivo já está lá
+    };
+  };
+
+  const restaurar = async (regs) => {
+    const cache = new Map();
+    const cacheImg = async (h) => {
+      if (cache.has(h)) return cache.get(h);
+      const b = await rascunho.lerImagem(h);
+      const url = b ? await blobParaDataUrl(b) : null;
+      if (url) imgsGravadas.current.add(h); // já está no banco: não regravar depois
+      cache.set(h, url);
+      return url;
+    };
+    const docs = [];
+    for (const reg of regs) {
+      try { const d = await docDoRegistro(reg, cacheImg); if (d) docs.push(d); }
+      catch { /* registro corrompido: descarta esse, mantém os outros */ }
+    }
+    if (!docs.length) { showAlert("Nada a restaurar", "Os arquivos do rascunho não puderam ser lidos."); return; }
+    // os ids das anotações vêm de textSeq, que reinicia em 0 a cada recarga: sem
+    // recalcular, uma anotação nova nasceria com id repetido e a seleção/borracha
+    // passariam a agir na marcação errada.
+    let maior = 0;
+    for (const d of docs)
+      for (const lista of Object.values(d.annotations))
+        for (const a of lista) {
+          const m = /^[tsyl](\d+)$/.exec(a.id || "");
+          if (m) maior = Math.max(maior, +m[1]);
+        }
+    textSeq.current = Math.max(textSeq.current, maior);
+    ordemSeq.current = Math.max(ordemSeq.current, ...docs.map((d) => d.ordem || 0));
+    // concatena em vez de trocar: entre o prompt aparecer e o auditor responder ele
+    // pode ter aberto um arquivo, e essa fila não pode ser descartada.
+    // Muta antes de apontar o activeId — o efeito de render sai calado se getActive()
+    // não achar o documento, e não reagenda.
+    const jaAbertos = store.current.docs;
+    store.current.docs = [...jaAbertos, ...docs];
+    if (!jaAbertos.length) { setActiveId(docs[0].id); setPage(docs[0].page || 1); }
+    tick();
+  };
+
+  useEffect(() => {
+    if (bootFeito.current) return; // <StrictMode> monta 2× em dev
+    bootFeito.current = true;
+    (async () => {
+      rascunho.aoFalhar(() => {
+        if (avisouFalha.current) return;
+        avisouFalha.current = true;
+        persistir.current = false;
+        showAlert("Rascunho automático indisponível",
+          "Não foi possível gravar a recuperação neste navegador (espaço cheio ou janela anônima). O editor funciona normalmente — lembre de baixar o PDF auditado ao terminar.");
+      });
+      if (!await rascunho.iniciar()) return;       // sem IndexedDB: segue sem rascunho
+      if (!await reivindicarAba()) {
+        showAlert("Outra aba do Editor está aberta",
+          "A recuperação automática ficou ativa apenas na primeira aba, para as duas não gravarem uma por cima da outra.");
+        return;
+      }
+      persistir.current = true;
+      // arquivos abertos enquanto o boot corria ainda não foram gravados
+      for (const d of store.current.docs) salvarRascunho(d, d.page);
+
+      let regs = await rascunho.listarSessoes();
+      // teto de segurança: quem nunca exporta acumularia rascunho para sempre
+      const limite = Date.now() - 30 * 24 * 3600 * 1000;
+      const velhos = regs.filter((r) => (r.atualizadoEm || 0) < limite);
+      for (const r of velhos) rascunho.apagarDoc(r.key);
+      regs = regs.filter((r) => (r.atualizadoEm || 0) >= limite);
+      rascunho.coletarLixo(hashesDosRegistros(regs));
+      // sem o PDF guardado não há como remontar o documento — não entra na contagem
+      regs = regs.filter((r) => !r.semBinario);
+      if (!regs.length) return;
+      // o auditor já começou a trabalhar enquanto o boot corria: não interrompe com o
+      // prompt nem troca a fila por baixo dele. O rascunho antigo continua guardado e
+      // volta a ser oferecido na próxima abertura.
+      if (store.current.docs.length) return;
+
+      regs.sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
+      ordemSeq.current = Math.max(0, ...regs.map((r) => r.ordem || 0));
+      const marcas = regs.reduce(
+        (s, r) => s + Object.values(r.annotations || {}).reduce((n, l) => n + (l ? l.length : 0), 0), 0);
+      const quando = new Date(Math.max(...regs.map((r) => r.atualizadoEm || 0)))
+        .toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+      const plural = (n, um, muitos) => `${n} ${n === 1 ? um : muitos}`;
+      const oQue = plural(regs.length, "documento", "documentos")
+        + (marcas ? ` com ${plural(marcas, "marcação", "marcações")}` : " ainda sem marcação");
+      showConfirm(
+        "Retomar de onde parou?",
+        `Encontramos ${oQue} da sessão de ${quando}. Quer continuar esse trabalho?`,
+        () => { restaurar(regs); },
+        {
+          confirmText: "Restaurar",
+          cancelText: "Começar do zero",
+          onCancel: () => { imgsGravadas.current.clear(); rascunho.limparTudo(); },
+          semBackdrop: true, // um clique fora não pode descartar o trabalho
+        });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // avisa que há trabalho ainda não exportado (o rascunho é rede de segurança, não
+  // substitui o PDF auditado). Também cobre a janela de segundos do autosave.
+  useEffect(() => {
+    const h = (e) => {
+      const pendente = store.current.docs.some(
+        (d) => !d.saved && Object.values(d.annotations).some((l) => l.length));
+      if (pendente) { e.preventDefault(); e.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, []);
+
+  // no mobile o beforeunload não dispara de forma confiável; visibilitychange sim
+  useEffect(() => {
+    const h = () => {
+      if (document.visibilityState !== "hidden") return;
+      const d = getActive();
+      if (d && !d.saved) { clearTimeout(autosave.current.timer); salvarRascunho(d, page); }
+    };
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, page]);
+
   // ---- ações ----
   const addFiles = async (fileList) => {
     const arr = [...fileList].filter((f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name));
     for (const f of arr) {
       const bytes = await f.arrayBuffer();
-      store.current.docs.push({
+      const doc = {
         id: ++seq.current, name: f.name, bytes, pdfDoc: null,
         numPages: 0, page: 1, annotations: {}, saved: false,
         totalConta: "",        // preenchido na calculadora (ou herdado do PDF)
         herdado: null,         // glosas da etapa anterior, lidas dos metadados
         keywordsOriginais: "", // keywords que o PDF já trazia — preservadas ao exportar
-      });
+        // ---- rascunho ----
+        key: rascunho.novaChave(), // id estável (o `id` acima reinicia a cada recarga)
+        ordem: ++ordemSeq.current,
+        metaLida: false,           // ver o efeito de render: só lê os metadados uma vez
+        semBinario: false,         // true quando o PDF é grande demais para o rascunho
+        binarioGravado: false,     // o PDF ainda não foi para o rascunho
+      };
+      store.current.docs.push(doc);
+      // sem await: 50 PDFs não podem esperar a fila do IndexedDB para aparecer na tela.
+      // new Blob([bytes]) lá dentro copia — o doc.bytes original segue intacto para o
+      // PDFDocument.load da exportação.
+      salvarRascunho(doc, doc.page);
     }
     tick();
     if (!activeId && store.current.docs.length) { setActiveId(store.current.docs[0].id); setPage(1); }
   };
   const selectDoc = (id) => {
     const old = getActive(); if (old) old.page = page;
+    // grava o documento que está saindo: trocar activeId descarta o timer pendente
+    // do autosave, e as últimas marcações dele se perderiam.
+    if (old && !old.saved) { clearTimeout(autosave.current.timer); salvarRascunho(old, page); }
     const d = store.current.docs.find((x) => x.id === id);
     setActiveId(id); setPage(d.page || 1);
     setSidebarOpen(false); // fecha a gaveta no mobile
@@ -1523,6 +1782,7 @@ export default function EditorAuditoria() {
       const list = store.current.docs;
       const idx = list.findIndex((x) => x.id === id);
       store.current.docs = list.filter((x) => x.id !== id);
+      if (d.key) rascunho.apagarDoc(d.key); // sai da fila, sai do rascunho
       if (id === activeId) {
         const rest = store.current.docs;
         const next = rest[idx] || rest[idx - 1] || null;
@@ -1541,6 +1801,7 @@ export default function EditorAuditoria() {
     if (l && l.length) {
       const ann = l.pop();
       redo.current.push({ docId: activeId, page, ann });
+      d.saved = false;
       setSelectedId(null); drawOverlay(); tick();
     }
   };
@@ -1548,13 +1809,15 @@ export default function EditorAuditoria() {
     const item = redo.current.pop(); if (!item) return;
     const d = store.current.docs.find((x) => x.id === item.docId); if (!d) return;
     (d.annotations[item.page] = d.annotations[item.page] || []).push(item.ann);
+    d.saved = false;
     drawOverlay(); tick();
   };
   const clearPage = () => {
     const d = getActive();
     if (!d || !(d.annotations[page] || []).length) return;
     showConfirm("Limpar página", "Remover todas as marcações desta página?", () => {
-      d.annotations[page] = []; setSelectedId(null); drawOverlay(); tick();
+      d.annotations[page] = []; d.saved = false;
+      setSelectedId(null); drawOverlay(); tick();
     }, { confirmText: "Limpar" });
   };
   const prevPage = () => { if (page > 1) { const d = getActive(); d.page = page - 1; setPage(page - 1); } };
@@ -1674,7 +1937,13 @@ export default function EditorAuditoria() {
   const doSaveOne = async () => {
     const d = getActive(); if (!d) return;
     setSaving(true);
-    try { dl(await buildPdf(d), outName(d.name)); d.saved = true; tick(); }
+    try {
+      dl(await buildPdf(d), outName(d.name));
+      d.saved = true;
+      // o PDF auditado saiu: o rascunho cumpriu o papel e é descartado
+      if (d.key) { rascunho.apagarDoc(d.key); d.binarioGravado = false; }
+      tick();
+    }
     catch (e) { showAlert("Erro ao gerar", e.message); }
     finally { setSaving(false); }
   };
@@ -1696,6 +1965,9 @@ export default function EditorAuditoria() {
       for (const d of alvo) { zip.file(outName(d.name), await buildPdf(d)); d.saved = true; }
       const blob = await zip.generateAsync({ type: "blob" });
       dl(blob, "auditados.zip", "application/zip"); tick();
+      // só depois do download: se a compactação falhasse, o rascunho ainda seria a
+      // única cópia do trabalho (d.saved já foi marcado no laço acima).
+      for (const d of alvo) if (d.key) { rascunho.apagarDoc(d.key); d.binarioGravado = false; }
       setSidebarOpen(false);
     } catch (e) { showAlert("Erro ao compactar", e.message); }
     finally { setSaving(false); }
@@ -2135,15 +2407,16 @@ export default function EditorAuditoria() {
       {/* diálogo customizado (alert/confirm) */}
       {dialog && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setDialog(null)} />
+          <div className="absolute inset-0 bg-black/50"
+            onClick={() => { if (!dialog.semBackdrop) setDialog(null); }} />
           <div className="relative bg-[var(--surface)] rounded-xl shadow-2xl p-5 w-full max-w-sm border border-[var(--border)]">
             <b className="text-[var(--text)] block mb-2">{dialog.title}</b>
             <p className="text-sm text-[var(--muted)] mb-4 leading-relaxed">{dialog.message}</p>
             <div className="flex justify-end gap-2">
               {!dialog.alert && (
-                <button onClick={() => setDialog(null)}
+                <button onClick={() => { const cb = dialog.onCancel; setDialog(null); if (cb) cb(); }}
                   className="px-3 py-2 rounded-lg text-sm border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]">
-                  Cancelar
+                  {dialog.cancelText || "Cancelar"}
                 </button>
               )}
               <button onClick={() => { const cb = dialog.onConfirm; setDialog(null); if (cb) cb(); }}
