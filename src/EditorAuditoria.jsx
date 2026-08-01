@@ -4,6 +4,7 @@ import {
   FilePlus, Folder, Undo2, Trash2, Save, Download,
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
+  Keyboard,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -29,13 +30,74 @@ const hexA = (h, al) => {
 const COR_ADM = "#2148c0"; // azul  — glosa administrativa
 const COR_TEC = "#d92d20"; // vermelho — glosa técnica
 const CORES = [
-  { id: "adm", hex: COR_ADM, label: "Administrativa", title: "Glosa administrativa (azul)" },
-  { id: "tec", hex: COR_TEC, label: "Técnica", title: "Glosa técnica (vermelha)" },
+  { id: "adm", hex: COR_ADM, label: "Administrativa", title: "Glosa administrativa (azul) — tecla A" },
+  { id: "tec", hex: COR_TEC, label: "Técnica", title: "Glosa técnica (vermelha) — tecla T" },
 ];
 const classeGlosa = (hex) => {
   const h = String(hex || "").toLowerCase();
   return h === COR_ADM ? "adm" : h === COR_TEC ? "tec" : null;
 };
+
+// ---- ferramentas e atalhos ----
+// a ordem desta lista É a numeração das teclas 1..7 (toolbar e teclado leem daqui)
+const FERRAMENTAS = [
+  { id: "pen", label: "Desenho", Icon: Pencil },
+  { id: "line", label: "Linha", Icon: Minus },
+  { id: "text", label: "Texto", Icon: Type },
+  { id: "highlight", label: "Destaque", Icon: Highlighter },
+  { id: "check", label: "Check", Icon: Check },
+  { id: "eraser", label: "Borracha", Icon: Eraser },
+  { id: "ocr", label: "Copiar código", Icon: ScanText },
+];
+// tela de ajuda (tecla ?) — manter em sincronia com o handler de keydown
+const ATALHOS = [
+  {
+    grupo: "Ferramentas",
+    itens: [
+      ...FERRAMENTAS.map((f, i) => ({ teclas: [String(i + 1)], descricao: f.label })),
+      { teclas: ["0"], descricao: "Modo navegar (nenhuma ferramenta)" },
+      { teclas: ["C"], descricao: "Painel de carimbos" },
+      { teclas: ["Esc"], descricao: "Fecha balões, desmarca o item, volta a navegar" },
+    ],
+  },
+  {
+    grupo: "Glosa e marca",
+    itens: [
+      { teclas: ["A"], descricao: "Glosa administrativa (azul)" },
+      { teclas: ["T"], descricao: "Glosa técnica (vermelha)" },
+      { teclas: ["X"], descricao: "Alterna ✓ / ✗ (ativa o Check)" },
+      { teclas: ["G"], descricao: "Abre/recolhe a calculadora de glosas" },
+    ],
+  },
+  {
+    grupo: "Edição",
+    itens: [
+      { teclas: ["Ctrl", "Z"], descricao: "Desfazer" },
+      { teclas: ["Ctrl", "Y"], descricao: "Refazer" },
+      { teclas: ["Delete"], descricao: "Apaga o item selecionado" },
+      { teclas: ["↑", "↓", "←", "→"], descricao: "Move o item selecionado (10 pt com Shift)" },
+    ],
+  },
+  {
+    grupo: "Navegação e zoom",
+    itens: [
+      { teclas: ["←", "→"], descricao: "Página anterior / próxima (sem item selecionado)" },
+      { teclas: ["PageUp", "PageDown"], descricao: "Página anterior / próxima" },
+      { teclas: ["Home", "End"], descricao: "Primeira / última página" },
+      { teclas: ["[", "]"], descricao: "Documento anterior / próximo da fila" },
+      { teclas: ["+", "−"], descricao: "Aproxima / afasta o zoom" },
+      { teclas: ["Ctrl", "0"], descricao: "Zoom em 100%" },
+    ],
+  },
+  {
+    grupo: "Arquivo",
+    itens: [
+      { teclas: ["Ctrl", "S"], descricao: "Salvar este documento" },
+      { teclas: ["Ctrl", "Shift", "S"], descricao: "Baixar todos auditados (.zip)" },
+      { teclas: ["?"], descricao: "Abre esta tela de atalhos" },
+    ],
+  },
+];
 
 // glosa administrativa: a equipe sempre escreve "G <valor>".
 // exigir as 2 casas decimais é o que descarta código ("2401") e as próprias linhas
@@ -662,14 +724,13 @@ function LinhaGlosa({ hex, nome, valor, n, nota }) {
 
 // ---- calculadora de glosas (painel flutuante no canto superior direito) ----
 // soma sozinha enquanto o auditor marca, e monta o fechamento que hoje é digitado à mão.
-function CalculadoraGlosas({ g, totalConta, onTotalConta, onInserirResumo, onIrPara, onRemover }) {
-  const [aberto, setAberto] = useState(() => localStorage.getItem("calcAberta") !== "0");
+// `aberto`/`alterna` vêm do editor (e não de estado local) porque a tecla G também alterna o painel
+function CalculadoraGlosas({ g, aberto, alterna, totalConta, onTotalConta, onInserirResumo, onIrPara, onRemover }) {
   const [itens, setItens] = useState(false);
-  const alterna = (v) => { setAberto(v); localStorage.setItem("calcAberta", v ? "1" : "0"); };
 
   if (!aberto)
     return (
-      <button onClick={() => alterna(true)} title="Abrir a calculadora de glosas"
+      <button onClick={() => alterna(true)} title="Abrir a calculadora de glosas (G)"
         className="absolute top-3 right-3 z-20 flex items-center gap-2 px-3 py-2 rounded-lg shadow-lg
           text-sm font-semibold bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]
           hover:bg-[var(--hover)]">
@@ -687,7 +748,7 @@ function CalculadoraGlosas({ g, totalConta, onTotalConta, onInserirResumo, onIrP
       <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
         <Calculator className="w-4 h-4 text-[var(--accent)]" />
         <b className="flex-1 text-xs uppercase tracking-wide">Glosas</b>
-        <button onClick={() => alterna(false)} title="Recolher"
+        <button onClick={() => alterna(false)} title="Recolher (G)"
           className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">–</button>
       </div>
 
@@ -757,6 +818,52 @@ function CalculadoraGlosas({ g, totalConta, onTotalConta, onInserirResumo, onIrP
   );
 }
 
+// ---- tela de atalhos (tecla ?) ----
+function AjudaAtalhos({ onFechar }) {
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onFechar} />
+      <div className="relative bg-[var(--surface)] rounded-xl shadow-2xl p-4 w-full max-w-2xl
+        max-h-[85vh] overflow-auto maida-scroll border border-[var(--border)]">
+        <div className="flex items-center justify-between mb-3">
+          <b className="flex items-center gap-2 text-[var(--text)]">
+            <Keyboard className="w-4 h-4 text-[var(--accent)]" />
+            Atalhos do teclado
+          </b>
+          <button onClick={onFechar} title="Fechar (Esc)"
+            className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <p className="text-xs text-[var(--muted)] mb-3 leading-relaxed">
+          Os atalhos não disparam enquanto você digita num campo de texto.
+        </p>
+        <div className="grid sm:grid-cols-2 gap-x-6 gap-y-4">
+          {ATALHOS.map((sec) => (
+            <div key={sec.grupo}>
+              <div className="text-xs uppercase tracking-wide text-[var(--muted)] mb-1.5">{sec.grupo}</div>
+              <div className="flex flex-col">
+                {sec.itens.map((it) => (
+                  <div key={it.descricao}
+                    className="flex items-baseline gap-2 py-1 border-b border-[var(--border)] last:border-0">
+                    <span className="flex flex-wrap gap-1 shrink-0">
+                      {it.teclas.map((t) => (
+                        <kbd key={t} className="px-1.5 py-0.5 rounded-md text-[11px] font-mono
+                          border border-[var(--border)] bg-[var(--panel)] text-[var(--text)]">{t}</kbd>
+                      ))}
+                    </span>
+                    <span className="flex-1 text-xs text-[var(--text)] text-right">{it.descricao}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function EditorAuditoria() {
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
   const [loadErr] = useState("");
@@ -777,6 +884,10 @@ export default function EditorAuditoria() {
   const [saving, setSaving] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [stampsOpen, setStampsOpen] = useState(false);
+  const [ajudaOpen, setAjudaOpen] = useState(false); // tela de atalhos (tecla ?)
+  // painel da calculadora: mora aqui (e não dentro dela) porque a tecla G também o alterna
+  const [calcAberta, setCalcAberta] = useState(() => localStorage.getItem("calcAberta") !== "0");
+  const alternaCalc = (v) => { setCalcAberta(v); localStorage.setItem("calcAberta", v ? "1" : "0"); };
   const [userStamps, setUserStamps] = useState(loadUserStamps);
   const [dialog, setDialog] = useState(null); // alert/confirm customizado
   const showAlert = (title, message) => setDialog({ title, message, alert: true });
@@ -1835,34 +1946,6 @@ export default function EditorAuditoria() {
     setPageInput(String(goToPage(n)));
   };
 
-  // atalhos de teclado (lê versão atual via ref)
-  const kb = useRef({});
-  kb.current = { undo, redoAction, prevPage, nextPage, nudgeSelected, deleteText, editingId, selectedId };
-  useEffect(() => {
-    const h = (e) => {
-      // não interferir enquanto o usuário digita num campo
-      const t = e.target;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if ((e.key === "Delete" || e.key === "Backspace") && kb.current.selectedId && !kb.current.editingId) {
-        e.preventDefault(); kb.current.deleteText(kb.current.selectedId); return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); kb.current.undo(); }
-      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); kb.current.redoAction(); }
-      // setas: movem o item selecionado; sem seleção, passam as páginas (como antes)
-      if (e.key.startsWith("Arrow")) {
-        const passo = e.shiftKey ? 10 : 1; // 1pt no ajuste fino, 10pt com Shift
-        const dx = e.key === "ArrowLeft" ? -passo : e.key === "ArrowRight" ? passo : 0;
-        const dy = e.key === "ArrowUp" ? -passo : e.key === "ArrowDown" ? passo : 0;
-        if (!dx && !dy) return;
-        if (kb.current.nudgeSelected(dx, dy)) { e.preventDefault(); return; }
-        if (dx < 0) kb.current.prevPage();
-        if (dx > 0) kb.current.nextPage(); // sem seleção, ↑/↓ seguem rolando a página
-      }
-    };
-    window.addEventListener("keydown", h);
-    return () => window.removeEventListener("keydown", h);
-  }, []);
-
   // ---- exportar ----
   const hexRgb = (h) => {
     const n = parseInt(h.slice(1), 16);
@@ -1973,6 +2056,121 @@ export default function EditorAuditoria() {
     finally { setSaving(false); }
   };
 
+  // ---- atalhos de teclado ----
+  // este bloco fica no fim de propósito: o kb.current abaixo lê saveOne/saveAll e companhia,
+  // e ler um const antes da linha que o declara é ReferenceError na hora do render (tela branca).
+  const irUltimaPagina = () => { const d = getActive(); if (d && d.numPages) goToPage(d.numPages); };
+  // [ e ]: anda na fila de documentos (Ctrl+PageUp/Down não serve, o Chrome fica com elas)
+  const stepDoc = (delta) => {
+    const lista = store.current.docs; if (lista.length < 2) return;
+    const i = lista.findIndex((d) => d.id === activeId);
+    const alvo = lista[Math.min(lista.length - 1, Math.max(0, (i < 0 ? 0 : i) + delta))];
+    if (alvo && alvo.id !== activeId) selectDoc(alvo.id);
+  };
+  // mesmos passos e limites dos botões de zoom do rodapé
+  const zoomPasso = (d) => setScale((s) => Math.min(3, Math.max(0.5, Math.round((s + d) * 100) / 100)));
+  // X: troca ✓/✗ e já deixa o Check ativo (igual ao botão da toolbar)
+  const alternaMarca = () => {
+    setCheckSymbol((s) => (s === "check" ? "cross" : "check"));
+    if (tool !== "check") setTool("check");
+  };
+  const abrirCarimbos = () => { if (getActive()) setStampsOpen(true); };
+  const confirmarDialog = () => { const cb = dialog && dialog.onConfirm; setDialog(null); if (cb) cb(); };
+  // Esc fecha uma coisa de cada vez, começando pela que está por cima
+  const escapar = () => {
+    if (ajudaOpen) { setAjudaOpen(false); return; }
+    if (dialog) { if (!dialog.semBackdrop) setDialog(null); return; }
+    if (stampsOpen) { setStampsOpen(false); return; }
+    if (glosaTec) { setGlosaTec(null); return; }
+    if (ocr) { setOcr(null); setOcrHold(false); return; }
+    if (selectedId) { setSelectedId(null); return; }
+    if (tool !== "select") setTool("select");
+  };
+
+  // atalhos de teclado (lê versão atual via ref) — a lista para o usuário está em ATALHOS
+  const kb = useRef({});
+  kb.current = {
+    undo, redoAction, prevPage, nextPage, nudgeSelected, deleteText, editingId, selectedId,
+    selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
+    goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
+    escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta,
+    modalAberto: !!(dialog || stampsOpen || ajudaOpen || glosaTec),
+  };
+  useEffect(() => {
+    const h = (e) => {
+      if (!e.key) return; // eventos sintéticos/IME podem chegar sem key
+      // não interferir enquanto o usuário digita num campo
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const k = e.key;
+      const ctrl = e.ctrlKey || e.metaKey;
+
+      if (k === "Escape") { e.preventDefault(); kb.current.escapar(); return; }
+      // com um modal aberto, o resto dos atalhos cala a boca (o Esc acima já o fecha)
+      if (kb.current.modalAberto) {
+        const d = kb.current.dialog;
+        if (k === "Enter" && d && !d.semBackdrop) { e.preventDefault(); kb.current.confirmarDialog(); }
+        return;
+      }
+
+      if ((k === "Delete" || k === "Backspace") && kb.current.selectedId && !kb.current.editingId) {
+        e.preventDefault(); kb.current.deleteText(kb.current.selectedId); return;
+      }
+      if (ctrl && k.toLowerCase() === "s") { // preventDefault: senão o navegador salva a página
+        e.preventDefault();
+        if (!kb.current.saving) { if (e.shiftKey) kb.current.saveAll(); else kb.current.saveOne(); }
+        return;
+      }
+      if (ctrl && k.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); kb.current.undo(); return; }
+      if (ctrl && (k.toLowerCase() === "y" || (k.toLowerCase() === "z" && e.shiftKey))) {
+        e.preventDefault(); kb.current.redoAction(); return;
+      }
+      if (ctrl && k === "0") { e.preventDefault(); kb.current.setScale(1); return; }
+      if (k === "?" || k === "F1") { e.preventDefault(); kb.current.setAjudaOpen(true); return; }
+
+      // setas: movem o item selecionado; sem seleção, passam as páginas (como antes)
+      if (k.startsWith("Arrow")) {
+        const passo = e.shiftKey ? 10 : 1; // 1pt no ajuste fino, 10pt com Shift
+        const dx = k === "ArrowLeft" ? -passo : k === "ArrowRight" ? passo : 0;
+        const dy = k === "ArrowUp" ? -passo : k === "ArrowDown" ? passo : 0;
+        if (!dx && !dy) return;
+        if (kb.current.nudgeSelected(dx, dy)) { e.preventDefault(); return; }
+        if (dx < 0) kb.current.prevPage();
+        if (dx > 0) kb.current.nextPage(); // sem seleção, ↑/↓ seguem rolando a página
+        return;
+      }
+
+      // daqui para baixo são teclas soltas: com Ctrl/Alt, deixa passar para o navegador
+      if (ctrl || e.altKey) return;
+
+      if (k === "+" || k === "=") { e.preventDefault(); kb.current.zoomPasso(0.15); return; }
+      if (k === "-" || k === "_") { e.preventDefault(); kb.current.zoomPasso(-0.15); return; }
+      if (k === "PageDown") { e.preventDefault(); kb.current.nextPage(); return; }
+      if (k === "PageUp") { e.preventDefault(); kb.current.prevPage(); return; }
+      if (k === "Home") { e.preventDefault(); kb.current.goToPage(1); return; }
+      if (k === "End") { e.preventDefault(); kb.current.irUltimaPagina(); return; }
+      if (k === "]") { e.preventDefault(); kb.current.stepDoc(1); return; }
+      if (k === "[") { e.preventDefault(); kb.current.stepDoc(-1); return; }
+
+      // ferramentas: 1..7 na ordem da toolbar; 0 volta ao modo navegar
+      if (k >= "1" && k <= String(FERRAMENTAS.length)) {
+        e.preventDefault(); kb.current.selectTool(FERRAMENTAS[Number(k) - 1].id); return;
+      }
+      if (k === "0") { e.preventDefault(); kb.current.setTool("select"); kb.current.setSelectedId(null); return; }
+
+      switch (k.toLowerCase()) {
+        case "a": e.preventDefault(); kb.current.setColor(COR_ADM); break;
+        case "t": e.preventDefault(); kb.current.setColor(COR_TEC); break;
+        case "x": e.preventDefault(); kb.current.alternaMarca(); break;
+        case "c": e.preventDefault(); kb.current.abrirCarimbos(); break;
+        case "g": e.preventDefault(); kb.current.alternaCalc(!kb.current.calcAberta); break;
+        default: break;
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
   // ---- derivados ----
   const docs = store.current.docs;
   const marked = docs.filter((d) => Object.values(d.annotations).some((l) => l.length)).length;
@@ -1984,16 +2182,6 @@ export default function EditorAuditoria() {
     if (Object.values(d.annotations).some((l) => l.length)) return ["Marcado", "bg-amber-100 text-amber-700"];
     return ["Pendente", "bg-slate-100 text-slate-500"];
   };
-
-  const tools = [
-    { id: "pen", label: "Desenho", Icon: Pencil },
-    { id: "line", label: "Linha", Icon: Minus },
-    { id: "text", label: "Texto", Icon: Type },
-    { id: "highlight", label: "Destaque", Icon: Highlighter },
-    { id: "check", label: "Check", Icon: Check },
-    { id: "eraser", label: "Borracha", Icon: Eraser },
-    { id: "ocr", label: "Copiar código", Icon: ScanText },
-  ];
 
   return (
     <div className={"flex flex-col app-shell text-[var(--text)] select-none tema-" + tema}
@@ -2013,6 +2201,10 @@ export default function EditorAuditoria() {
             <Folder className="w-4 h-4" />
             Docs{docs.length ? ` (${docs.length})` : ""}
           </button>
+          <button className="btn-tema" onClick={() => setAjudaOpen(true)} title="Atalhos do teclado (?)">
+            <Keyboard className="w-4 h-4" />
+            <span className="hidden sm:inline">Atalhos</span>
+          </button>
           <button className="btn-tema" onClick={() => setTema(tema === "claro" ? "escuro" : "claro")}>
             {tema === "claro" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
             <span className="hidden sm:inline">{tema === "claro" ? "Escuro" : "Claro"}</span>
@@ -2023,8 +2215,8 @@ export default function EditorAuditoria() {
       {/* toolbar (compacta no celular: só ícones, quebra linha se precisar) */}
       <header className="flex flex-wrap items-center gap-2 md:gap-3 px-2 md:px-4 py-2 bg-[var(--surface)] border-y border-[var(--border)] shadow-sm z-10">
         <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
-          {tools.map(({ id, label, Icon }) => (
-            <button key={id} onClick={() => selectTool(id)} title={label}
+          {FERRAMENTAS.map(({ id, label, Icon }, i) => (
+            <button key={id} onClick={() => selectTool(id)} title={`${label} (${i + 1})`}
               className={"flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
                 (tool === id
                   ? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
@@ -2032,7 +2224,7 @@ export default function EditorAuditoria() {
               <Icon className="w-4 h-4" /><span className="hidden sm:inline">{label}</span>
             </button>
           ))}
-          <button onClick={() => { if (getActive()) setStampsOpen(true); }} title="Carimbo"
+          <button onClick={abrirCarimbos} title="Carimbo (C)"
             disabled={!active}
             className={"flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap disabled:opacity-40 " +
               (stampsOpen
@@ -2070,8 +2262,8 @@ export default function EditorAuditoria() {
         <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
           <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Marca</span>
           {[
-            { id: "check", Icon: Check, title: "Marca de certo (✓)" },
-            { id: "cross", Icon: X, title: "Marca de errado (✗)" },
+            { id: "check", Icon: Check, title: "Marca de certo (✓) — tecla X alterna" },
+            { id: "cross", Icon: X, title: "Marca de errado (✗) — tecla X alterna" },
           ].map(({ id, Icon, title }) => (
             <button key={id} onClick={() => { setCheckSymbol(id); if (tool !== "check") setTool("check"); }}
               title={title}
@@ -2085,11 +2277,11 @@ export default function EditorAuditoria() {
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
-          <button onClick={undo} disabled={!hasMarks} title="Desfazer"
+          <button onClick={undo} disabled={!hasMarks} title="Desfazer (Ctrl+Z)"
             className="flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
             <Undo2 className="w-4 h-4" /><span className="hidden sm:inline">Desfazer</span>
           </button>
-          <button onClick={redoAction} disabled={redo.current.length === 0} title="Refazer"
+          <button onClick={redoAction} disabled={redo.current.length === 0} title="Refazer (Ctrl+Y)"
             className="flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
             <Redo2 className="w-4 h-4" /><span className="hidden sm:inline">Refazer</span>
           </button>
@@ -2099,7 +2291,7 @@ export default function EditorAuditoria() {
           </button>
         </div>
 
-        <button onClick={saveOne} disabled={!active || saving} title="Salvar este"
+        <button onClick={saveOne} disabled={!active || saving} title="Salvar este (Ctrl+S)"
           className="flex shrink-0 items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40 whitespace-nowrap">
           <Save className="w-4 h-4" /><span className="hidden sm:inline">Salvar este</span>
         </button>
@@ -2166,7 +2358,7 @@ export default function EditorAuditoria() {
           </div>
 
           <div className="p-3 border-t border-[var(--border)]">
-            <button onClick={saveAll} disabled={marked === 0 || saving}
+            <button onClick={saveAll} disabled={marked === 0 || saving} title="Baixar todos auditados (Ctrl+Shift+S)"
               className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40">
               <Download className="w-4 h-4" />Baixar todos auditados (.zip)
             </button>
@@ -2395,6 +2587,8 @@ export default function EditorAuditoria() {
         {active && (
           <CalculadoraGlosas
             g={glosas}
+            aberto={calcAberta}
+            alterna={alternaCalc}
             totalConta={active.totalConta}
             onTotalConta={setTotalConta}
             onInserirResumo={inserirResumo}
@@ -2427,6 +2621,9 @@ export default function EditorAuditoria() {
           </div>
         </div>
       )}
+
+      {/* tela de atalhos do teclado */}
+      {ajudaOpen && <AjudaAtalhos onFechar={() => setAjudaOpen(false)} />}
 
       {/* painel de carimbos */}
       {stampsOpen && (
@@ -2483,7 +2680,7 @@ export default function EditorAuditoria() {
         <span className="truncate max-w-xs hidden md:block">{active ? active.name : "—"}</span>
         <div className="flex-1 hidden md:block" />
         <div className="flex items-center gap-1.5">
-          <button onClick={prevPage} disabled={!active || page <= 1}
+          <button onClick={prevPage} disabled={!active || page <= 1} title="Página anterior (PageUp)"
             className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><ChevronLeft className="w-4 h-4" /></button>
           <span className="flex items-center gap-1">
             <span className="hidden sm:inline">Página</span>
@@ -2500,15 +2697,16 @@ export default function EditorAuditoria() {
               className="w-12 px-1 py-0.5 text-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)] disabled:opacity-40" />
             <span>/ {active ? active.numPages : 0}</span>
           </span>
-          <button onClick={nextPage} disabled={!active || page >= (active ? active.numPages : 0)}
+          <button onClick={nextPage} disabled={!active || page >= (active ? active.numPages : 0)} title="Próxima página (PageDown)"
             className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><ChevronRight className="w-4 h-4" /></button>
         </div>
         <div className="flex-1 hidden md:block" />
         <div className="flex items-center gap-1.5">
-          <button onClick={() => setScale((s) => Math.max(0.5, s - 0.15))} disabled={!active}
+          <button onClick={() => zoomPasso(-0.15)} disabled={!active} title="Afastar (tecla −)"
             className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><Minus className="w-4 h-4" /></button>
-          <span className="w-12 text-center">{Math.round(scale * 100)}%</span>
-          <button onClick={() => setScale((s) => Math.min(3, s + 0.15))} disabled={!active}
+          <button onClick={() => setScale(1)} disabled={!active} title="Voltar a 100% (Ctrl+0)"
+            className="w-12 text-center rounded-md hover:bg-[var(--hover)] disabled:opacity-40">{Math.round(scale * 100)}%</button>
+          <button onClick={() => zoomPasso(0.15)} disabled={!active} title="Aproximar (tecla +)"
             className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><Plus className="w-4 h-4" /></button>
         </div>
       </footer>
