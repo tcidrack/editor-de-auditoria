@@ -4,7 +4,7 @@ import {
   FilePlus, Folder, Undo2, Trash2, Save, Download,
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
-  Keyboard,
+  Keyboard, LogOut,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -14,6 +14,7 @@ import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import { PDFDocument, rgb, StandardFonts, LineCapStyle } from "pdf-lib";
 import JSZip from "jszip";
 import * as rascunho from "./rascunho";
+import { PAPEIS, usaCarimbo, lerCarimbo, salvarCarimbo, apagarCarimbo } from "./conta";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const LOGO_MAIDA =
@@ -194,30 +195,19 @@ const lerGlosasDoPdf = (keywords) => {
 const { serializarAnns, restaurarAnns, dataUrlParaBlob, blobParaDataUrl, hashesDosRegistros } = rascunho;
 
 // ---- carimbos ----
-// nome do dono a partir do arquivo: "carimbo-aline-batista.png" → "Aline Batista"
-const stampName = (file) =>
-  file
-    .replace(/\.(png|jpe?g)$/i, "")
-    .replace(/^carimbo[-_]*/i, "")
-    .replace(/[-_]+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (c) => c.toUpperCase()) || "Carimbo";
+// A assinatura mora num bucket privado do Supabase, uma pasta por usuário, e só o dono
+// baixa a dele. Em memória durante a sessão e nada em disco: carimbo parado no
+// localStorage era exatamente o que precisávamos parar de fazer.
+// Limpa de uma vez as chaves das versões anteriores, que ainda guardam assinatura aqui.
+const ehUuid = (v) =>
+  typeof v === "string" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(v);
 
-// carimbos da pasta local (src/carimbos é ignorada pelo git — sigilosa;
-// entram apenas em builds feitos nesta máquina)
-// ?inline → embute como data-URI base64 no bundle (sem asset baixável em /assets)
-const stampFiles = import.meta.glob("./carimbos/*.{png,jpg,jpeg}", {
-  eager: true, query: "?inline", import: "default",
-});
-const LOCAL_STAMPS = Object.entries(stampFiles).map(([path, url]) => {
-  const file = path.split("/").pop();
-  return { key: "f:" + file, nome: stampName(file), url, local: false };
-});
-
-// carimbos adicionados pelo usuário no navegador (nunca saem do dispositivo)
-const loadUserStamps = () => {
-  try { return JSON.parse(localStorage.getItem("carimbos") || "[]"); }
-  catch { return []; }
+const limparCarimbosAntigos = () => {
+  try {
+    const mortas = Object.keys(localStorage)
+      .filter((k) => k === "carimbos" || k.startsWith("carimbos:"));
+    for (const k of mortas) localStorage.removeItem(k);
+  } catch { /* sem localStorage não há o que limpar */ }
 };
 
 
@@ -864,8 +854,10 @@ function AjudaAtalhos({ onFechar }) {
   );
 }
 
-export default function EditorAuditoria() {
+export default function EditorAuditoria({ usuario, onSair }) {
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
+  const papel = PAPEIS[usuario.papel] || {};
+  const carimbaDoc = usaCarimbo(usuario); // técnico assina; administrativo não
   const [loadErr] = useState("");
 
   const [tema, setTema] = useState(() => localStorage.getItem("tema") || "claro");
@@ -878,7 +870,9 @@ export default function EditorAuditoria() {
   const [pageInput, setPageInput] = useState("1"); // campo "ir para página" do rodapé
   const [scale, setScale] = useState(1.3);
   const [tool, setTool] = useState("pen");
-  const [color, setColor] = useState(COR_TEC);
+  // a cor padrão sai do papel; os dois botões seguem disponíveis para os dois papéis
+  // (o administrativo precisa enxergar, e às vezes ajustar, a glosa técnica herdada do PDF)
+  const [color, setColor] = useState(carimbaDoc ? COR_TEC : COR_ADM);
   const [thickness, setThickness] = useState(2);
   const [checkSymbol, setCheckSymbol] = useState("check"); // símbolo ativo: "check" | "cross"
   const [saving, setSaving] = useState(false);
@@ -888,7 +882,9 @@ export default function EditorAuditoria() {
   // painel da calculadora: mora aqui (e não dentro dela) porque a tecla G também o alterna
   const [calcAberta, setCalcAberta] = useState(() => localStorage.getItem("calcAberta") !== "0");
   const alternaCalc = (v) => { setCalcAberta(v); localStorage.setItem("calcAberta", v ? "1" : "0"); };
-  const [userStamps, setUserStamps] = useState(loadUserStamps);
+  // carimbo do auditor: data-URL vinda do bucket, só em memória
+  const [carimbo, setCarimbo] = useState(null);
+  const [carimboOcupado, setCarimboOcupado] = useState(true);
   const [dialog, setDialog] = useState(null); // alert/confirm customizado
   const showAlert = (title, message) => setDialog({ title, message, alert: true });
   const showConfirm = (title, message, onConfirm, opts = {}) =>
@@ -970,7 +966,7 @@ export default function EditorAuditoria() {
         if (b) { imgsGravadas.current.add(h); rascunho.salvarImagem(h, b); }
       }
       rascunho.salvarSessao({
-        key: doc.key, nome: doc.name, ordem: doc.ordem || 0,
+        key: doc.key, dono: usuario.id, nome: doc.name, ordem: doc.ordem || 0,
         page: pg || doc.page || 1, numPages: doc.numPages || 0,
         totalConta: doc.totalConta || "", herdado: doc.herdado || null,
         keywordsOriginais: doc.keywordsOriginais || "",
@@ -1649,7 +1645,19 @@ export default function EditorAuditoria() {
   };
 
   // ---- carimbos ----
-  const allStamps = [...LOCAL_STAMPS, ...userStamps];
+  // baixa do bucket na entrada; some da memória quando o auditor sai (a remontagem por
+  // key={usuario.id} no portão garante que não sobra carimbo do anterior)
+  useEffect(() => {
+    let vivo = true;
+    limparCarimbosAntigos();
+    (async () => {
+      if (!carimbaDoc) { if (vivo) setCarimboOcupado(false); return; }
+      const url = await lerCarimbo(usuario.id);
+      if (vivo) { setCarimbo(url); setCarimboOcupado(false); }
+    })();
+    return () => { vivo = false; };
+  }, [usuario.id, carimbaDoc]);
+
   const addStamp = (stamp, ratio) => {
     const doc = getActive(); if (!doc) return;
     const m = mainRef.current;
@@ -1668,22 +1676,24 @@ export default function EditorAuditoria() {
     const a = findText(id); if (!a) return;
     a.w = w; a.h = h; getActive().saved = false; tick();
   };
-  // upload de carimbo do próprio usuário — fica apenas neste navegador (localStorage)
-  const addUserStamp = (file) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const novo = { key: "u:" + Date.now(), nome: stampName(file.name), url: reader.result, local: true };
-      const lista = [...userStamps, novo];
-      setUserStamps(lista);
-      try { localStorage.setItem("carimbos", JSON.stringify(lista)); }
-      catch { showAlert("Não foi possível salvar", "O carimbo pode ser grande demais. Tente uma imagem menor."); }
-    };
-    reader.readAsDataURL(file);
+  // envia (ou substitui) o carimbo do auditor no bucket
+  const enviarCarimbo = async (file) => {
+    setCarimboOcupado(true);
+    const { url, erro } = await salvarCarimbo(usuario.id, file);
+    setCarimboOcupado(false);
+    if (erro) return showAlert("Não foi possível enviar", erro);
+    setCarimbo(url);
   };
-  const removeUserStamp = (key) => {
-    const lista = userStamps.filter((s) => s.key !== key);
-    setUserStamps(lista);
-    localStorage.setItem("carimbos", JSON.stringify(lista));
+  const removerCarimbo = () => {
+    showConfirm("Remover carimbo",
+      "O seu carimbo sai do servidor e você precisará enviá-lo de novo para assinar.",
+      async () => {
+        setCarimboOcupado(true);
+        const { erro } = await apagarCarimbo(usuario.id);
+        setCarimboOcupado(false);
+        if (erro) return showAlert("Não foi possível remover", erro);
+        setCarimbo(null);
+      }, { confirmText: "Remover" });
   };
 
   // ---- rascunho: retomada da sessão ----
@@ -1695,7 +1705,9 @@ export default function EditorAuditoria() {
     let livre = true;
     try {
       if (!globalThis.BroadcastChannel) return resolve(true); // sem suporte: segue sozinho
-      const ch = new BroadcastChannel("editor-auditoria");
+      // canal por auditor: duas abas do MESMO auditor brigam pelo rascunho, de auditores
+      // diferentes não — os registros de cada um são separados
+      const ch = new BroadcastChannel("editor-auditoria:" + usuario.id);
       canal.current = ch;
       ch.onmessage = (e) => {
         const m = e.data || {};
@@ -1789,14 +1801,21 @@ export default function EditorAuditoria() {
       for (const d of store.current.docs) salvarRascunho(d, d.page);
 
       let regs = await rascunho.listarSessoes();
-      // teto de segurança: quem nunca exporta acumularia rascunho para sempre
+      // teto de segurança: quem nunca exporta acumularia rascunho para sempre.
+      // A purga é por idade, então varre os registros de todo mundo mesmo.
       const limite = Date.now() - 30 * 24 * 3600 * 1000;
       const velhos = regs.filter((r) => (r.atualizadoEm || 0) < limite);
       for (const r of velhos) rascunho.apagarDoc(r.key);
       regs = regs.filter((r) => (r.atualizadoEm || 0) >= limite);
+      // a coleta de lixo precisa dos hashes de TODOS os registros: filtrar por dono aqui
+      // apagaria as imagens de carimbo que estão nos rascunhos dos outros auditores
       rascunho.coletarLixo(hashesDosRegistros(regs));
       // sem o PDF guardado não há como remontar o documento — não entra na contagem
       regs = regs.filter((r) => !r.semBinario);
+      // só o que é meu. Registro sem dono, ou com dono em formato antigo (era o id da lista
+      // no bundle, hoje é o uuid do Supabase), é anterior a esta versão: fica para quem
+      // entrar primeiro neste navegador, e ao restaurar já sai regravado no nome dele.
+      regs = regs.filter((r) => r.dono === usuario.id || !ehUuid(r.dono));
       if (!regs.length) return;
       // o auditor já começou a trabalhar enquanto o boot corria: não interrompe com o
       // prompt nem troca a fila por baixo dele. O rascunho antigo continua guardado e
@@ -1819,7 +1838,12 @@ export default function EditorAuditoria() {
         {
           confirmText: "Restaurar",
           cancelText: "Começar do zero",
-          onCancel: () => { imgsGravadas.current.clear(); rascunho.limparTudo(); },
+          // apaga documento por documento: limparTudo() zeraria as stores inteiras e
+          // levaria junto o rascunho dos outros auditores desta máquina
+          onCancel: () => {
+            imgsGravadas.current.clear();
+            for (const r of regs) rascunho.apagarDoc(r.key);
+          },
           semBackdrop: true, // um clique fora não pode descartar o trabalho
         });
     })();
@@ -2033,7 +2057,8 @@ export default function EditorAuditoria() {
   const saveOne = () => {
     const d = getActive(); if (!d) return;
     const temCarimbo = Object.values(d.annotations).some((l) => l.some((a) => a.type === "stamp"));
-    if (!temCarimbo)
+    // o aviso é só para quem assina: para o administrativo seria ruído em toda exportação
+    if (!temCarimbo && carimbaDoc)
       showConfirm("Salvar sem carimbo?",
         "Você não inseriu nenhum carimbo neste documento. Deseja salvar mesmo assim?",
         doSaveOne, { confirmText: "Salvar assim" });
@@ -2171,6 +2196,18 @@ export default function EditorAuditoria() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
+  // sair troca de auditor sem passar pelo beforeunload, que é quem avisa do trabalho não
+  // exportado — o rascunho fica guardado e volta a ser oferecido no próximo login dele,
+  // mas quem clicou precisa saber disso antes.
+  const sair = () => {
+    const pendente = store.current.docs.some(
+      (d) => !d.saved && Object.values(d.annotations).some((l) => l.length));
+    if (!pendente) return onSair();
+    showConfirm("Sair do Editor",
+      "Há marcações que ainda não foram baixadas. Elas ficam guardadas no rascunho deste navegador e voltam a ser oferecidas quando você entrar de novo.",
+      onSair, { confirmText: "Sair mesmo assim" });
+  };
+
   // ---- derivados ----
   const docs = store.current.docs;
   const marked = docs.filter((d) => Object.values(d.annotations).some((l) => l.length)).length;
@@ -2196,6 +2233,15 @@ export default function EditorAuditoria() {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {/* quem está auditando: o carimbo e o rascunho desta tela são desta pessoa */}
+          <div className="hidden md:flex flex-col leading-tight text-white text-right min-w-0">
+            <b className="text-xs truncate">{usuario.nome}</b>
+            <span className="text-[11px] opacity-80 truncate">{papel.label || usuario.papel}</span>
+          </div>
+          <button className="btn-tema" onClick={sair} title={`Sair de ${usuario.nome}`}>
+            <LogOut className="w-4 h-4" />
+            <span className="hidden sm:inline">Sair</span>
+          </button>
           {/* abre a fila de documentos no mobile */}
           <button className="btn-tema md:hidden" onClick={() => setSidebarOpen(true)}>
             <Folder className="w-4 h-4" />
@@ -2631,46 +2677,47 @@ export default function EditorAuditoria() {
           <div className="absolute inset-0 bg-black/50" onClick={() => setStampsOpen(false)} />
           <div className="relative bg-[var(--surface)] rounded-xl shadow-2xl p-4 w-full max-w-md max-h-[80vh] overflow-auto maida-scroll border border-[var(--border)]">
             <div className="flex items-center justify-between mb-3">
-              <b className="text-[var(--text)]">Escolha o seu carimbo</b>
+              <b className="text-[var(--text)]">Seu carimbo</b>
               <button onClick={() => setStampsOpen(false)} title="Fechar"
                 className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">
                 <X className="w-4 h-4" />
               </button>
             </div>
-            {allStamps.length === 0 && (
+            {carimboOcupado ? (
+              <p className="text-sm text-[var(--muted)] py-4 text-center">Falando com o servidor…</p>
+            ) : !carimbo ? (
               <p className="text-sm text-[var(--muted)] mb-3 leading-relaxed">
-                Nenhum carimbo neste dispositivo ainda. Clique em <b>Adicionar carimbo</b> e
-                escolha a imagem (PNG) do seu carimbo — ela fica salva <b>somente neste navegador</b>,
-                não é enviada para nenhum servidor.
+                Você ainda não enviou o seu carimbo. Clique em <b>Enviar carimbo</b> e escolha a
+                imagem (PNG). Ela fica guardada <b>na sua conta</b>, alcançável só por você — e
+                por isso aparece também quando você entrar de outra máquina.
               </p>
-            )}
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              {allStamps.map((s) => (
-                <div key={s.key}
-                  onClick={(e) => {
-                    const img = e.currentTarget.querySelector("img");
-                    addStamp(s, img && img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.4);
-                  }}
-                  className="relative border border-[var(--border)] rounded-lg p-2 cursor-pointer bg-white hover:border-[var(--accent)] hover:shadow">
-                  <img src={s.url} alt={s.nome} draggable={false} onContextMenu={(e) => e.preventDefault()}
-                    className="w-full h-16 object-contain pointer-events-none" />
-                  <div className="text-xs font-bold text-center mt-1.5 truncate text-slate-800">{s.nome}</div>
-                  {s.local && (
-                    <button onClick={(ev) => { ev.stopPropagation(); removeUserStamp(s.key); }}
-                      title="Remover deste dispositivo"
-                      className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-red-600 text-white text-xs shadow">
-                      ×
-                    </button>
-                  )}
+            ) : (
+              <div
+                onClick={(e) => {
+                  const img = e.currentTarget.querySelector("img");
+                  addStamp({ url: carimbo },
+                    img && img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.4);
+                }}
+                className="relative border border-[var(--border)] rounded-lg p-2 mb-3 cursor-pointer bg-white hover:border-[var(--accent)] hover:shadow">
+                <img src={carimbo} alt={"Carimbo de " + usuario.nome} draggable={false}
+                  onContextMenu={(e) => e.preventDefault()}
+                  className="w-full h-20 object-contain pointer-events-none" />
+                <div className="text-xs font-bold text-center mt-1.5 truncate text-slate-800">
+                  {usuario.nome}
                 </div>
-              ))}
-            </div>
-            <button onClick={() => stampFileRef.current.click()}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]">
-              <FilePlus className="w-4 h-4" />Adicionar carimbo (fica só neste dispositivo)
+                <button onClick={(ev) => { ev.stopPropagation(); removerCarimbo(); }}
+                  title="Remover o carimbo da minha conta"
+                  className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-red-600 text-white text-xs shadow">
+                  ×
+                </button>
+              </div>
+            )}
+            <button onClick={() => stampFileRef.current.click()} disabled={carimboOcupado}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40">
+              <FilePlus className="w-4 h-4" />{carimbo ? "Substituir carimbo" : "Enviar carimbo"}
             </button>
             <input ref={stampFileRef} type="file" accept="image/png,image/jpeg" hidden
-              onChange={(e) => { const f = e.target.files[0]; if (f) addUserStamp(f); e.target.value = ""; }} />
+              onChange={(e) => { const f = e.target.files[0]; if (f) enviarCarimbo(f); e.target.value = ""; }} />
           </div>
         </div>
       )}

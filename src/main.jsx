@@ -2,6 +2,7 @@ import { StrictMode, Component } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import EditorAuditoria from "./EditorAuditoria.jsx";
+import PortaoLogin from "./Login.jsx";
 
 // rede de segurança: sem isto, um erro no render derruba a árvore e sobra uma página em branco,
 // sem pista nenhuma para quem está auditando. O estilo é inline de propósito — o erro pode ter
@@ -44,7 +45,12 @@ class ErroFatal extends Component {
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <ErroFatal>
-      <EditorAuditoria />
+      {/* o boundary fica por fora: erro na tela de login também precisa cair nele.
+          key={usuario.id} força remontagem limpa na troca de auditor — sem isso, a fila de
+          documentos e os carimbos do anterior continuariam em memória. */}
+      <PortaoLogin>
+        {(usuario, sair) => <EditorAuditoria key={usuario.id} usuario={usuario} onSair={sair} />}
+      </PortaoLogin>
     </ErroFatal>
   </StrictMode>
 );
