@@ -3,6 +3,7 @@ import { LogIn, ShieldAlert } from "lucide-react";
 import {
   configurado, entrar, sair, sessaoAtual, aoMudarSessao, lerPerfil,
 } from "./conta";
+import CampoSenha from "./CampoSenha";
 import "./EditorAuditoria.css";
 
 const LOGO_MAIDA =
@@ -53,7 +54,9 @@ export default function PortaoLogin({ children }) {
       const perfil = await lerPerfil(authUser.id);
       if (!vivo) return;
       if (!perfil) { setSemPerfil(true); setEstado("fora"); return; } // conta sem linha em perfis
-      setUsuario(perfil); setSemPerfil(false); setEstado("dentro");
+      // o e-mail vem do auth, não de perfis: o editor grava a autoria no PDF exportado
+      setUsuario({ ...perfil, email: authUser.email || "" });
+      setSemPerfil(false); setEstado("dentro");
     };
     sessaoAtual().then(resolver);
     const cancelar = aoMudarSessao(resolver);
@@ -114,12 +117,8 @@ export default function PortaoLogin({ children }) {
             border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
             focus:outline-none focus:border-[var(--accent)]" />
 
-        <label className="block text-xs text-[var(--muted)] mb-1">Senha</label>
-        <input type="password" autoComplete="current-password" value={senha}
-          onChange={(e) => { setSenha(e.target.value); setErro(""); }}
-          className="w-full px-2.5 py-2 rounded-lg
-            border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
-            focus:outline-none focus:border-[var(--accent)]" />
+        <CampoSenha label="Senha" autoComplete="current-password" value={senha}
+          onChange={(e) => { setSenha(e.target.value); setErro(""); }} />
 
         {erro && <div className="mt-2 text-xs text-red-500">{erro}</div>}
 

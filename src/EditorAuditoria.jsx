@@ -4,7 +4,7 @@ import {
   FilePlus, Folder, Undo2, Trash2, Save, Download,
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
-  Keyboard, LogOut,
+  Keyboard, LogOut, KeyRound, Settings,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -14,7 +14,8 @@ import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import { PDFDocument, rgb, StandardFonts, LineCapStyle } from "pdf-lib";
 import JSZip from "jszip";
 import * as rascunho from "./rascunho";
-import { PAPEIS, usaCarimbo, lerCarimbo, salvarCarimbo, apagarCarimbo } from "./conta";
+import { PAPEIS, usaCarimbo, lerCarimbo, salvarCarimbo, apagarCarimbo, trocarSenha } from "./conta";
+import CampoSenha from "./CampoSenha";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const LOGO_MAIDA =
@@ -164,14 +165,40 @@ const calcGlosas = (doc) => {
 // achatadas no arquivo, o app não teria como somar a glosa técnica do colega — então ela
 // viaja junto, nas Keywords (campo padrão, que o pdf.js devolve de volta em info.Keywords).
 const PREFIXO_GLOSAS = "maida-glosas:";
-const gravarGlosas = (out, doc) => {
+
+// quem já auditou este documento, na ordem. É lista, e não campo único, porque a auditoria
+// tem duas etapas: o técnico risca e salva, o administrativo abre o PDF já riscado e exporta
+// de novo — com campo único, o segundo apagaria o primeiro.
+const listaAuditores = (doc, auditor) => {
+  const l = doc && doc.herdado && Array.isArray(doc.herdado.auditores) ? [...doc.herdado.auditores] : [];
+  if (!auditor) return l;
+  const novo = { nome: auditor.nome, email: auditor.email || "", em: new Date().toISOString() };
+  // reexportar o mesmo documento não empilha a mesma pessoa: atualiza a data dela
+  if (l.length && l[l.length - 1].email === novo.email) l[l.length - 1] = novo;
+  else l.push(novo);
+  return l;
+};
+const dataCurta = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? "" : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" });
+};
+const ultimoAuditor = (doc) => {
+  const l = doc && doc.herdado && Array.isArray(doc.herdado.auditores) ? doc.herdado.auditores : [];
+  return l.length ? l[l.length - 1] : null;
+};
+
+const gravarGlosas = (out, doc, auditor) => {
   const g = calcGlosas(doc);
-  if (!g.tec.length && !g.adm.length && g.totalConta == null) return;
+  const auditores = listaAuditores(doc, auditor);
+  // sem glosa nenhuma o payload ainda vale a pena: ele carrega a autoria
+  if (!g.tec.length && !g.adm.length && g.totalConta == null && !auditores.length) return;
   const payload = {
     v: 1,
     totalConta: g.totalConta,
     tec: g.tec.map((i) => ({ p: i.pagina, q: i.qtd, u: i.unit, v: i.valor })),
     adm: g.adm.map((i) => ({ p: i.pagina, v: i.valor })),
+    auditores,
   };
   // o pdf-lib junta o array num único campo separado por espaço, e é assim que o pdf.js
   // devolve — por isso a nossa entrada vai por último e o JSON sai sem espaços.
@@ -854,6 +881,124 @@ function AjudaAtalhos({ onFechar }) {
   );
 }
 
+// ---- menu de configurações (engrenagem) ----
+// Junta o que é da conta e da aparência: sem isso, a barra da marca acumulava seis botões e
+// empurrava o título para baixo em tela estreita.
+function MenuConta({ usuario, papel, tema, aberto, onAlternar, onFechar, onSenha, onAtalhos, onTema, onSair }) {
+  const caixa = useRef(null);
+  useEffect(() => {
+    if (!aberto) return;
+    const fora = (e) => { if (caixa.current && !caixa.current.contains(e.target)) onFechar(); };
+    document.addEventListener("pointerdown", fora);
+    return () => document.removeEventListener("pointerdown", fora);
+  }, [aberto, onFechar]);
+
+  const item = "w-full flex items-center gap-2 px-3 py-2.5 text-sm text-left " +
+    "text-[var(--text)] hover:bg-[var(--hover)]";
+
+  return (
+    <div className="relative" ref={caixa}>
+      <button className="btn-tema" onClick={onAlternar} title="Configurações" aria-expanded={aberto}>
+        <Settings className="w-4 h-4" />
+        <span className="hidden lg:inline">Configurações</span>
+      </button>
+      {aberto && (
+        <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-xl overflow-hidden
+          shadow-lg border border-[var(--border)] bg-[var(--surface)]">
+          <div className="px-3 py-2 border-b border-[var(--border)]">
+            <b className="block text-sm truncate text-[var(--text)]">{usuario.nome}</b>
+            <span className="block text-xs text-[var(--muted)] truncate">{papel.label || usuario.papel}</span>
+          </div>
+          <button className={item} onClick={() => { onFechar(); onSenha(); }}>
+            <KeyRound className="w-4 h-4 text-[var(--muted)]" />Trocar senha
+          </button>
+          <button className={item} onClick={() => { onFechar(); onAtalhos(); }}>
+            <Keyboard className="w-4 h-4 text-[var(--muted)]" />Atalhos do teclado
+          </button>
+          <button className={item} onClick={() => { onFechar(); onTema(); }}>
+            {tema === "claro"
+              ? <Moon className="w-4 h-4 text-[var(--muted)]" />
+              : <Sun className="w-4 h-4 text-[var(--muted)]" />}
+            Tema {tema === "claro" ? "escuro" : "claro"}
+          </button>
+          <button className={item + " border-t border-[var(--border)]"} onClick={() => { onFechar(); onSair(); }}>
+            <LogOut className="w-4 h-4 text-[var(--muted)]" />Sair
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- trocar a própria senha (quem cria conta continua sendo só o admin) ----
+function TrocarSenha({ onFechar }) {
+  const [atual, setAtual] = useState("");
+  const [nova, setNova] = useState("");
+  const [repete, setRepete] = useState("");
+  const [erro, setErro] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [pronto, setPronto] = useState(false);
+
+  const enviar = async (e) => {
+    e.preventDefault();
+    if (salvando) return;
+    if (nova.length < 6) return setErro("A nova senha precisa ter pelo menos 6 caracteres.");
+    if (nova !== repete) return setErro("A confirmação não bate com a nova senha.");
+    if (nova === atual) return setErro("A nova senha precisa ser diferente da atual.");
+    setSalvando(true); setErro("");
+    const { erro: falhou } = await trocarSenha(atual, nova);
+    setSalvando(false);
+    if (falhou) return setErro(falhou);
+    setPronto(true);
+    setTimeout(onFechar, 1600);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onFechar} />
+      <div className="relative bg-[var(--surface)] rounded-xl shadow-2xl p-5 w-full max-w-sm border border-[var(--border)]">
+        <div className="flex items-center justify-between mb-3">
+          <b className="text-[var(--text)]">Trocar a minha senha</b>
+          <button onClick={onFechar} title="Fechar (Esc)"
+            className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {pronto ? (
+          <p className="text-sm text-[var(--text)] py-2">
+            Senha trocada. Use a nova da próxima vez que entrar.
+          </p>
+        ) : (
+          <form onSubmit={enviar}>
+            <CampoSenha label="Senha atual" autoComplete="current-password" value={atual}
+              className="mb-3" onChange={(e) => { setAtual(e.target.value); setErro(""); }} />
+
+            <CampoSenha label="Nova senha" autoComplete="new-password" value={nova}
+              className="mb-3" onChange={(e) => { setNova(e.target.value); setErro(""); }} />
+
+            <CampoSenha label="Repita a nova senha" autoComplete="new-password" value={repete}
+              onChange={(e) => { setRepete(e.target.value); setErro(""); }} />
+
+            {erro && <div className="mt-2 text-xs text-red-500">{erro}</div>}
+
+            <button type="submit" disabled={!atual || !nova || !repete || salvando}
+              className="mt-3 w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg
+                text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)]
+                hover:opacity-90 disabled:opacity-40">
+              <KeyRound className="w-4 h-4" />{salvando ? "Trocando…" : "Trocar senha"}
+            </button>
+            <p className="mt-2 text-[11px] text-[var(--muted)] leading-relaxed">
+              Pedimos a senha atual porque a sessão fica aberta: sem isso, quem passasse por uma
+              máquina destravada trocaria a sua senha.
+            </p>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function EditorAuditoria({ usuario, onSair }) {
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
   const papel = PAPEIS[usuario.papel] || {};
@@ -879,11 +1024,14 @@ export default function EditorAuditoria({ usuario, onSair }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [stampsOpen, setStampsOpen] = useState(false);
   const [ajudaOpen, setAjudaOpen] = useState(false); // tela de atalhos (tecla ?)
+  const [senhaOpen, setSenhaOpen] = useState(false); // trocar a própria senha
+  const [menuOpen, setMenuOpen] = useState(false);   // engrenagem do cabeçalho
   // painel da calculadora: mora aqui (e não dentro dela) porque a tecla G também o alterna
   const [calcAberta, setCalcAberta] = useState(() => localStorage.getItem("calcAberta") !== "0");
   const alternaCalc = (v) => { setCalcAberta(v); localStorage.setItem("calcAberta", v ? "1" : "0"); };
   // carimbo do auditor: data-URL vinda do bucket, só em memória
   const [carimbo, setCarimbo] = useState(null);
+  const [carimboErro, setCarimboErro] = useState(""); // recusa do servidor ≠ pasta vazia
   const [carimboOcupado, setCarimboOcupado] = useState(true);
   const [dialog, setDialog] = useState(null); // alert/confirm customizado
   const showAlert = (title, message) => setDialog({ title, message, alert: true });
@@ -1652,8 +1800,8 @@ export default function EditorAuditoria({ usuario, onSair }) {
     limparCarimbosAntigos();
     (async () => {
       if (!carimbaDoc) { if (vivo) setCarimboOcupado(false); return; }
-      const url = await lerCarimbo(usuario.id);
-      if (vivo) { setCarimbo(url); setCarimboOcupado(false); }
+      const { url, erro } = await lerCarimbo(usuario.id);
+      if (vivo) { setCarimbo(url || null); setCarimboErro(erro || ""); setCarimboOcupado(false); }
     })();
     return () => { vivo = false; };
   }, [usuario.id, carimbaDoc]);
@@ -1681,8 +1829,8 @@ export default function EditorAuditoria({ usuario, onSair }) {
     setCarimboOcupado(true);
     const { url, erro } = await salvarCarimbo(usuario.id, file);
     setCarimboOcupado(false);
-    if (erro) return showAlert("Não foi possível enviar", erro);
-    setCarimbo(url);
+    if (erro) { setCarimboErro(erro); return showAlert("Não foi possível enviar", erro); }
+    setCarimboErro(""); setCarimbo(url || null);
   };
   const removerCarimbo = () => {
     showConfirm("Remover carimbo",
@@ -1691,8 +1839,8 @@ export default function EditorAuditoria({ usuario, onSair }) {
         setCarimboOcupado(true);
         const { erro } = await apagarCarimbo(usuario.id);
         setCarimboOcupado(false);
-        if (erro) return showAlert("Não foi possível remover", erro);
-        setCarimbo(null);
+        if (erro) { setCarimboErro(erro); return showAlert("Não foi possível remover", erro); }
+        setCarimboErro(""); setCarimbo(null);
       }, { confirmText: "Remover" });
   };
 
@@ -2032,7 +2180,12 @@ export default function EditorAuditoria({ usuario, onSair }) {
         }
       }
     }
-    gravarGlosas(out, d);
+    gravarGlosas(out, d, usuario);
+    // campo Autor: é o que aparece em Arquivo > Propriedades de qualquer leitor de PDF e nos
+    // Detalhes do Windows. Metadado é editável, então isto é rastro, não prova.
+    const nomes = [...new Set(listaAuditores(d, usuario).map((a) => a.nome).filter(Boolean))];
+    if (nomes.length) out.setAuthor(nomes.join("; "));
+    out.setProducer("Editor de Auditoria — Maida");
     return out.save();
   };
   const outName = (n) => n.replace(/\.pdf$/i, "") + " - AUDITADO.pdf";
@@ -2103,6 +2256,8 @@ export default function EditorAuditoria({ usuario, onSair }) {
   const confirmarDialog = () => { const cb = dialog && dialog.onConfirm; setDialog(null); if (cb) cb(); };
   // Esc fecha uma coisa de cada vez, começando pela que está por cima
   const escapar = () => {
+    if (menuOpen) { setMenuOpen(false); return; }
+    if (senhaOpen) { setSenhaOpen(false); return; }
     if (ajudaOpen) { setAjudaOpen(false); return; }
     if (dialog) { if (!dialog.semBackdrop) setDialog(null); return; }
     if (stampsOpen) { setStampsOpen(false); return; }
@@ -2119,7 +2274,7 @@ export default function EditorAuditoria({ usuario, onSair }) {
     selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
     goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
     escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta,
-    modalAberto: !!(dialog || stampsOpen || ajudaOpen || glosaTec),
+    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec),
   };
   useEffect(() => {
     const h = (e) => {
@@ -2233,28 +2388,23 @@ export default function EditorAuditoria({ usuario, onSair }) {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {/* quem está auditando: o carimbo e o rascunho desta tela são desta pessoa */}
-          <div className="hidden md:flex flex-col leading-tight text-white text-right min-w-0">
-            <b className="text-xs truncate">{usuario.nome}</b>
-            <span className="text-[11px] opacity-80 truncate">{papel.label || usuario.papel}</span>
-          </div>
-          <button className="btn-tema" onClick={sair} title={`Sair de ${usuario.nome}`}>
-            <LogOut className="w-4 h-4" />
-            <span className="hidden sm:inline">Sair</span>
-          </button>
-          {/* abre a fila de documentos no mobile */}
+          {/* abre a fila de documentos no mobile — frequente demais para esconder no menu */}
           <button className="btn-tema md:hidden" onClick={() => setSidebarOpen(true)}>
             <Folder className="w-4 h-4" />
             Docs{docs.length ? ` (${docs.length})` : ""}
           </button>
-          <button className="btn-tema" onClick={() => setAjudaOpen(true)} title="Atalhos do teclado (?)">
-            <Keyboard className="w-4 h-4" />
-            <span className="hidden sm:inline">Atalhos</span>
-          </button>
-          <button className="btn-tema" onClick={() => setTema(tema === "claro" ? "escuro" : "claro")}>
-            {tema === "claro" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-            <span className="hidden sm:inline">{tema === "claro" ? "Escuro" : "Claro"}</span>
-          </button>
+          <MenuConta
+            usuario={usuario}
+            papel={papel}
+            tema={tema}
+            aberto={menuOpen}
+            onAlternar={() => setMenuOpen((v) => !v)}
+            onFechar={() => setMenuOpen(false)}
+            onSenha={() => setSenhaOpen(true)}
+            onAtalhos={() => setAjudaOpen(true)}
+            onTema={() => setTema(tema === "claro" ? "escuro" : "claro")}
+            onSair={sair}
+          />
         </div>
       </div>
 
@@ -2383,6 +2533,7 @@ export default function EditorAuditoria({ usuario, onSair }) {
           <div className="flex-1 overflow-auto p-2 maida-scroll">
             {docs.map((d) => {
               const [txt, cls] = statusOf(d);
+              const autor = ultimoAuditor(d); // veio das Keywords do PDF, se ele já foi auditado
               return (
                 <div key={d.id} onClick={() => selectDoc(d.id)}
                   className={"animated-card flex flex-col gap-1 p-2.5 rounded-xl cursor-pointer border " +
@@ -2398,6 +2549,12 @@ export default function EditorAuditoria({ usuario, onSair }) {
                     </button>
                   </div>
                   <span className="text-sm font-semibold truncate text-[var(--text)]">{d.name}</span>
+                  {autor && (
+                    <span className="text-[11px] text-[var(--muted)] truncate"
+                      title={d.herdado.auditores.map((a) => `${a.nome} — ${dataCurta(a.em)}`).join("\n")}>
+                      por {autor.nome} · {dataCurta(autor.em)}
+                    </span>
+                  )}
                 </div>
               );
             })}
@@ -2671,6 +2828,9 @@ export default function EditorAuditoria({ usuario, onSair }) {
       {/* tela de atalhos do teclado */}
       {ajudaOpen && <AjudaAtalhos onFechar={() => setAjudaOpen(false)} />}
 
+      {/* trocar a própria senha */}
+      {senhaOpen && <TrocarSenha onFechar={() => setSenhaOpen(false)} />}
+
       {/* painel de carimbos */}
       {stampsOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -2685,6 +2845,12 @@ export default function EditorAuditoria({ usuario, onSair }) {
             </div>
             {carimboOcupado ? (
               <p className="text-sm text-[var(--muted)] py-4 text-center">Falando com o servidor…</p>
+            ) : carimboErro ? (
+              /* recusa do servidor não pode virar "envie o seu carimbo": foi essa confusão
+                 que escondeu uma policy sumida do bucket por uma investigação inteira */
+              <p className="text-sm mb-3 leading-relaxed text-red-500">
+                Não foi possível ler o seu carimbo: {carimboErro}
+              </p>
             ) : !carimbo ? (
               <p className="text-sm text-[var(--muted)] mb-3 leading-relaxed">
                 Você ainda não enviou o seu carimbo. Clique em <b>Enviar carimbo</b> e escolha a

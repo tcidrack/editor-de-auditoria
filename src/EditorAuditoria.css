@@ -32,6 +32,10 @@
   --hover: rgba(255, 255, 255, 0.06);
 }
 
+/* o Edge desenha um olho nativo no campo de senha — sem isto, ficam dois lado a lado */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear { display: none; }
+
 /* ===== BOTÃO DE TEMA ===== */
 .btn-tema {
   display: inline-flex;

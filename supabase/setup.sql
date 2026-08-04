@@ -97,6 +97,20 @@ create trigger on_auth_user_created_perfil
 --   Vale também desligar o cadastro público em Authentication > Providers > Email
 --   (o app não tem tela de criar conta; sem isso, qualquer um com a anon key cria a sua).
 --
+-- Subir o carimbo de um técnico pelo painel (o painel ignora o RLS de propósito; pelo
+-- app, cada auditor só alcança a própria pasta):
+--   1. Pegue o UUID de cada técnico — é o nome da pasta:
+--
+--      select p.nome, u.email, u.id as nome_da_pasta
+--        from public.perfis p join auth.users u on u.id = p.id
+--       where p.papel = 'tecnico'
+--       order by p.nome;
+--
+--   2. Storage > carimbos > New folder com esse UUID, e suba o PNG dentro.
+--      O nome do arquivo não importa: o app lista a pasta e usa o que achar. Quando o
+--      próprio auditor envia pelo app, o arquivo é normalizado para carimbo.png e os
+--      outros da pasta são removidos, para nunca haver dois carimbos concorrentes.
+--
 -- Conferir quem está cadastrado:
 --      select u.email, p.nome, p.papel
 --        from public.perfis p join auth.users u on u.id = p.id

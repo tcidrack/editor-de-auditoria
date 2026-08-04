@@ -30,6 +30,15 @@ const traduzir = (msg) => {
   if (/email not confirmed/i.test(m)) return "Este e-mail ainda não foi confirmado.";
   if (/too many requests|rate limit/i.test(m)) return "Muitas tentativas seguidas. Espere um pouco e tente de novo.";
   if (/failed to fetch|network/i.test(m)) return "Sem conexão com o servidor. Verifique a rede.";
+  if (/should be at least (\d+) characters/i.test(m))
+    return `A senha precisa ter pelo menos ${/at least (\d+)/i.exec(m)[1]} caracteres.`;
+  if (/different from the old password/i.test(m)) return "A nova senha precisa ser diferente da atual.";
+  if (/reauthentication/i.test(m)) return "Por segurança, entre de novo antes de trocar a senha.";
+  // a policy do bucket sumir do storage.objects já aconteceu uma vez: sem policy o RLS nega
+  // tudo, e a tela precisa dizer isso em vez de fingir que a pasta está vazia
+  if (/row-level security|not authorized|unauthorized|403/i.test(m))
+    return "Sem permissão para ler o seu carimbo — confira a policy do bucket.";
+  if (/not found|404/i.test(m)) return "Bucket ou arquivo não encontrado no servidor.";
   return m || "Não foi possível entrar.";
 };
 
@@ -56,6 +65,21 @@ export const aoMudarSessao = (cb) => {
   return () => { try { data.subscription.unsubscribe(); } catch { /* já cancelado */ } };
 };
 
+// troca a senha de quem está logado. Exige a senha atual de propósito: a sessão não expira
+// sozinha, então sem isso quem passasse por uma máquina destravada tomaria a conta do colega.
+// (O cadastro segue fechado — isto muda senha, não cria conta.)
+export const trocarSenha = async (senhaAtual, novaSenha) => {
+  if (!sb) return { erro: "Supabase não configurado." };
+  const { data } = await sb.auth.getUser();
+  const email = data && data.user && data.user.email;
+  if (!email) return { erro: "Sessão expirada. Entre de novo." };
+  const { error: erroLogin } = await sb.auth.signInWithPassword({ email, password: senhaAtual });
+  if (erroLogin) return { erro: "Senha atual incorreta." };
+  const { error } = await sb.auth.updateUser({ password: novaSenha });
+  if (error) return { erro: traduzir(error.message) };
+  return {};
+};
+
 // ---- perfil (nome e papel) ----
 // o papel vem do banco, não do bundle: é o que impede alguém de se promover no devtools
 export const lerPerfil = async (userId) => {
@@ -73,24 +97,48 @@ const blobParaDataUrl = (blob) => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
-// devolve data-URL (formato que addStamp e o rascunho já consomem) ou null se não houver
+// o que há na pasta do usuário (o RLS já limita a busca à pasta dele).
+// Devolve { nomes, erro }: "pasta vazia" e "o servidor recusou" são coisas diferentes, e
+// confundir as duas foi o que nos custou uma caçada inteira atrás de uma policy sumida.
+const arquivosDoCarimbo = async (userId) => {
+  const { data, error } = await sb.storage.from(BUCKET).list(userId);
+  if (error) return { nomes: [], erro: traduzir(error.message) };
+  if (!Array.isArray(data)) return { nomes: [], erro: "Resposta inesperada do servidor." };
+  // .emptyFolderPlaceholder é criado pelo painel do Supabase — pasta com só ele é pasta vazia
+  return { nomes: data.filter((o) => o && o.name && /\.(png|jpe?g)$/i.test(o.name)).map((o) => o.name) };
+};
+
+// devolve { url, erro }. Lista a pasta em vez de exigir o nome "carimbo.png": quando o admin
+// sobe o carimbo pelo painel do Supabase, um arquivo com outro nome sumiria em silêncio.
 export const lerCarimbo = async (userId) => {
-  if (!sb) return null;
-  const { data, error } = await sb.storage.from(BUCKET).download(caminhoCarimbo(userId));
-  if (error || !data) return null;
-  try { return await blobParaDataUrl(data); } catch { return null; }
+  if (!sb) return { erro: "Supabase não configurado." };
+  const { nomes, erro } = await arquivosDoCarimbo(userId);
+  if (erro) return { erro };
+  if (!nomes.length) return {}; // pasta vazia: não é falha, é carimbo ainda não enviado
+  const { data, error } = await sb.storage.from(BUCKET).download(`${userId}/${nomes[0]}`);
+  if (error) return { erro: traduzir(error.message) };
+  if (!data) return { erro: "O arquivo do carimbo veio vazio." };
+  try { return { url: await blobParaDataUrl(data) }; }
+  catch { return { erro: "Não foi possível ler a imagem do carimbo." }; }
 };
 
 export const salvarCarimbo = async (userId, file) => {
   if (!sb) return { erro: "Supabase não configurado." };
+  const { nomes: antigos } = await arquivosDoCarimbo(userId);
   const { error } = await sb.storage.from(BUCKET)
     .upload(caminhoCarimbo(userId), file, { upsert: true, contentType: file.type || "image/png" });
   if (error) return { erro: traduzir(error.message) };
-  return { url: await lerCarimbo(userId) };
+  // a pasta fica com um arquivo só: sem isso, um carimbo subido pelo painel com outro nome
+  // continuaria lá e não daria para saber qual dos dois é o válido
+  const sobrando = antigos.filter((n) => n !== "carimbo.png").map((n) => `${userId}/${n}`);
+  if (sobrando.length) await sb.storage.from(BUCKET).remove(sobrando);
+  return lerCarimbo(userId);
 };
 
 export const apagarCarimbo = async (userId) => {
   if (!sb) return { erro: "Supabase não configurado." };
-  const { error } = await sb.storage.from(BUCKET).remove([caminhoCarimbo(userId)]);
+  const { nomes } = await arquivosDoCarimbo(userId);
+  const alvos = nomes.length ? nomes.map((n) => `${userId}/${n}`) : [caminhoCarimbo(userId)];
+  const { error } = await sb.storage.from(BUCKET).remove(alvos);
   return error ? { erro: traduzir(error.message) } : {};
 };
