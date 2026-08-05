@@ -4,7 +4,7 @@ import {
   FilePlus, Folder, Undo2, Trash2, Save, Download,
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
-  Keyboard, LogOut, KeyRound, Settings,
+  Keyboard, LogOut, KeyRound, Settings, Square,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -49,6 +49,9 @@ const FERRAMENTAS = [
   { id: "highlight", label: "Destaque", Icon: Highlighter },
   { id: "check", label: "Check", Icon: Check },
   { id: "eraser", label: "Borracha", Icon: Eraser },
+  // corrigir anda junto: cobre uma marcação já achatada num PDF exportado, na cor do fundo
+  // da própria página. O "Copiar código" fecha a fila por ser leitura, não marcação.
+  { id: "cover", label: "Corretivo", Icon: Square },
   { id: "ocr", label: "Copiar código", Icon: ScanText },
 ];
 // tela de ajuda (tecla ?) — manter em sincronia com o handler de keydown
@@ -178,6 +181,19 @@ const listaAuditores = (doc, auditor) => {
   else l.push(novo);
   return l;
 };
+// mediana por canal de um bloco RGBA — o miolo do conta-gotas do corretivo.
+// Mediana, e não média: um pixel escuro no meio de fundo claro (a borda de uma letra) puxaria
+// a média para o cinza e o corretivo sairia manchado. Exportada para poder ser testada.
+export const corMediana = (data) => {
+  const canal = (off) => {
+    const v = [];
+    for (let i = off; i < data.length; i += 4) v.push(data[i]);
+    v.sort((a, b) => a - b);
+    return v[Math.floor(v.length / 2)].toString(16).padStart(2, "0");
+  };
+  return `#${canal(0)}${canal(1)}${canal(2)}`;
+};
+
 const dataCurta = (iso) => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
@@ -526,6 +542,85 @@ function StampBox({ a, scale, selected, interactive, onMove, onResize, onSelect,
   );
 }
 
+// ---- corretivo: retângulo opaco na cor do fundo, para cobrir marcação já achatada ----
+// Redimensiona livre (não proporcional, ao contrário do carimbo): cobrir um valor exige
+// ajustar largura e altura de forma independente.
+function CoverBox({ a, scale, selected, interactive, onMove, onResize, onSelect, onDelete }) {
+  const drag = useRef(null);
+  const rez = useRef(null);
+  const [hover, setHover] = useState(false);
+
+  const startDrag = (e) => {
+    e.stopPropagation();
+    onSelect();
+    drag.current = { px: e.clientX, py: e.clientY, x: a.x, y: a.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const moveDrag = (e) => {
+    if (!drag.current) return;
+    const d = drag.current;
+    onMove(Math.max(0, d.x + (e.clientX - d.px) / scale),
+           Math.max(0, d.y + (e.clientY - d.py) / scale));
+  };
+  const endDrag = () => { drag.current = null; };
+
+  const startResize = (e) => {
+    e.stopPropagation();
+    rez.current = { px: e.clientX, py: e.clientY, w0: a.w, h0: a.h };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const moveResize = (e) => {
+    const r = rez.current; if (!r) return;
+    onResize(Math.max(4, r.w0 + (e.clientX - r.px) / scale),
+             Math.max(4, r.h0 + (e.clientY - r.py) / scale));
+  };
+  const endResize = () => { rez.current = null; };
+
+  return (
+    <div
+      onPointerDown={startDrag}
+      onPointerMove={moveDrag}
+      onPointerUp={endDrag}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={interactive ? "Corretivo — arraste p/ mover · canto p/ tamanho" : undefined}
+      style={{
+        position: "absolute",
+        left: a.x * scale, top: a.y * scale,
+        width: a.w * scale, height: a.h * scale,
+        background: a.color || "#ffffff",
+        cursor: interactive ? "move" : "default",
+        // contorno só na tela, nunca na exportação: um corretivo branco sobre fundo branco
+        // seria invisível e impossível de reposicionar depois
+        outline: !interactive ? "none"
+          : selected || hover ? "1.5px dashed var(--accent)" : "1px dashed rgba(120,120,120,.55)",
+        outlineOffset: 0,
+        pointerEvents: interactive ? "auto" : "none",
+        touchAction: "none",
+        userSelect: "none",
+      }}
+    >
+      {selected && interactive && (
+        <>
+          <RoundBtn bg="#d92d20" title="Excluir" onAction={onDelete}
+            style={{ top: -10, right: -10 }}>×</RoundBtn>
+          <div
+            onPointerDown={startResize}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            style={{
+              position: "absolute", bottom: -8, right: -8, width: 16, height: 16,
+              borderRadius: 4, background: "#fff", border: "1.5px solid var(--accent)",
+              boxShadow: "0 1px 3px rgba(0,0,0,.3)", zIndex: 2,
+              cursor: "nwse-resize", touchAction: "none",
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---- símbolo ✓ / ✗ (marca de verificado): mover, redimensionar e excluir ----
 // desenhado como vetor (SVG na tela, drawLine no PDF) — nítido em qualquer zoom
 function SymbolBox({ a, scale, selected, interactive, onMove, onResize, onSelect, onDelete, onDuplicate }) {
@@ -825,7 +920,12 @@ function CalculadoraGlosas({ g, aberto, alterna, totalConta, onTotalConta, onIns
                 {i.herdado ? <span className="ml-1 opacity-70">· do PDF</span> : null}
               </button>
               <b className="font-mono tabular-nums">{moeda(i.valor)}</b>
-              <button onClick={() => onRemover(i)} title="Tirar da conta (não apaga a marcação)"
+              {/* o que o × faz depende da origem: marcação desta sessão sai da página junto;
+                  herdada do PDF só sai da conta, porque lá a marcação virou tinta */}
+              <button onClick={() => onRemover(i)}
+                title={i.herdado
+                  ? "Tirar da conta — a marcação já está achatada no PDF recebido e não pode ser apagada"
+                  : "Apagar esta glosa e a marcação da página"}
                 className="px-1 rounded text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
             </div>
           ))}
@@ -1078,6 +1178,7 @@ export default function EditorAuditoria({ usuario, onSair }) {
   const drawing = useRef(false);
   const startPt = useRef(null);
   const penPts = useRef(null);    // pontos do traço livre em andamento (canetinha)
+  const corCover = useRef(null);  // cor amostrada no início do arrasto do corretivo
   const panning = useRef(null); // arrastar para navegar no modo neutro
   const redo = useRef([]);      // pilha de refazer: { docId, page, ann }
   const focal = useRef(null);   // ponto (coords doc) a centralizar após mudar o zoom
@@ -1132,7 +1233,7 @@ export default function EditorAuditoria({ usuario, onSair }) {
     [activeId, rev]);
 
   // ferramentas de desenho/marcação: enquanto ativas, as caixas DOM ficam não-interativas
-  const isDrawTool = ["pen", "line", "highlight", "check", "eraser", "ocr"].includes(tool);
+  const isDrawTool = ["pen", "line", "highlight", "check", "eraser", "ocr", "cover"].includes(tool);
 
   // ---- borracha: acha a anotação sob o ponto (de cima p/ baixo) ----
   const hitAnnotation = (p) => {
@@ -1270,6 +1371,12 @@ export default function EditorAuditoria({ usuario, onSair }) {
       const x = Math.min(a.x1, a.x2) * s, y = Math.min(a.y1, a.y2) * s;
       const w = Math.abs(a.x2 - a.x1) * s, h = Math.abs(a.y2 - a.y1) * s;
       ctx.fillStyle = hexA(a.color || "#ffd600", 0.38); ctx.fillRect(x, y, w, h);
+    } else if (a.type === "cover") {
+      // só o preview do arrasto passa por aqui: o corretivo já criado vira caixa DOM
+      // (CoverBox), para poder ser movido e redimensionado depois
+      const x = Math.min(a.x1, a.x2) * s, y = Math.min(a.y1, a.y2) * s;
+      const w = Math.abs(a.x2 - a.x1) * s, h = Math.abs(a.y2 - a.y1) * s;
+      ctx.fillStyle = a.color || "#ffffff"; ctx.fillRect(x, y, w, h);
     } else if (a.type === "ocrsel") {
       // seleção da ferramenta "Copiar código": só preview, nunca vira anotação
       const x = Math.min(a.x1, a.x2) * s, y = Math.min(a.y1, a.y2) * s;
@@ -1288,6 +1395,24 @@ export default function EditorAuditoria({ usuario, onSair }) {
     const doc = getActive(); if (!doc) return;
     (doc.annotations[page] || []).forEach((a) => paint(ctx, a));
     if (preview) paint(ctx, preview);
+  };
+
+  // ---- conta-gotas do corretivo ----
+  // Lê a cor do fundo da página no ponto, para o retângulo casar com a digitalização em vez
+  // de sair um branco chapado sobre papel acinzentado. Mediana de 5×5, e não um pixel só:
+  // um pixel isolado pode cair na borda de uma letra e devolver cinza escuro.
+  const amostrarCor = (p) => {
+    const b = baseRef.current;
+    if (!b) return "#ffffff";
+    try {
+      const r = b.getBoundingClientRect();
+      const k = r.width ? b.width / r.width : 1; // pixel do canvas por pixel de tela
+      const n = 5, meio = (n - 1) / 2;
+      const x0 = Math.max(0, Math.min(b.width - n, Math.round(p.x * scale * k) - meio));
+      const y0 = Math.max(0, Math.min(b.height - n, Math.round(p.y * scale * k) - meio));
+      const d = b.getContext("2d", { willReadFrequently: true }).getImageData(x0, y0, n, n).data;
+      return corMediana(d);
+    } catch { return "#ffffff"; } // página ainda não renderizada: branco resolve o caso comum
   };
 
   // ---- coordenadas ----
@@ -1387,6 +1512,13 @@ export default function EditorAuditoria({ usuario, onSair }) {
       drawing.current = true; penPts.current = [p];
       return;
     }
+    if (tool === "cover") {
+      // a cor sai do ponto onde o arrasto começa — por isso o auditor deve começar num
+      // pedaço limpo do fundo, ao lado do que vai cobrir
+      corCover.current = amostrarCor(p);
+      drawing.current = true; startPt.current = p;
+      return;
+    }
     if (tool !== "highlight" && tool !== "ocr") {
       // modo neutro: arrastar para navegar pelo documento (mouse ou dedo)
       const m = mainRef.current; if (!m) return;
@@ -1433,8 +1565,9 @@ export default function EditorAuditoria({ usuario, onSair }) {
       return;
     }
     const s = startPt.current;
-    drawOverlay(tool === "ocr"
-      ? { type: "ocrsel", x1: s.x, y1: s.y, x2: p.x, y2: p.y }
+    drawOverlay(
+      tool === "ocr" ? { type: "ocrsel", x1: s.x, y1: s.y, x2: p.x, y2: p.y }
+      : tool === "cover" ? { type: "cover", x1: s.x, y1: s.y, x2: p.x, y2: p.y, color: corCover.current }
       : { type: "highlight", x1: s.x, y1: s.y, x2: p.x, y2: p.y, color });
   };
   const onUp = (e) => {
@@ -1475,6 +1608,18 @@ export default function EditorAuditoria({ usuario, onSair }) {
       const w = Math.abs(p.x - s.x), h = Math.abs(p.y - s.y);
       drawOverlay();
       if (w >= 6 && h >= 6) readRegion({ x, y, w, h }); // ignora clique/arraste mínimo
+      return;
+    }
+    if (tool === "cover") {
+      const x = Math.min(s.x, p.x), y = Math.min(s.y, p.y);
+      const w = Math.abs(p.x - s.x), h = Math.abs(p.y - s.y);
+      drawOverlay(); // limpa o preview: daqui em diante quem desenha é a caixa DOM
+      if (w >= 4 && h >= 4) {
+        const id = "c" + ++textSeq.current;
+        (doc.annotations[page] = doc.annotations[page] || []).push(
+          { type: "cover", id, x, y, w, h, color: corCover.current || "#ffffff" });
+        doc.saved = false; redo.current = []; setSelectedId(id); tick();
+      }
       return;
     }
     if (Math.hypot(p.x - s.x, p.y - s.y) > 3) {
@@ -1742,16 +1887,42 @@ export default function EditorAuditoria({ usuario, onSair }) {
     doc.totalConta = txt; doc.saved = false; tick();
   };
   // tira um item da conta sem apagar a marcação do PDF (correção de leitura errada do OCR)
+  // × da lista de itens da calculadora.
+  //
+  // Marcação desta sessão: apaga a marcação junto. Antes daqui, o código só limpava
+  // glosa/glosaQtd/glosaUnit — campos que existem na glosa técnica e não na administrativa,
+  // então remover um "G 1,00" simplesmente não funcionava: o valor é lido do texto da caixa e
+  // voltava para a conta no recálculo seguinte. E deixar o "G 1,00" escrito na página sem
+  // entrar na conta seria pior que não remover: o PDF entregue mostraria uma glosa que o
+  // fechamento não tem.
+  //
+  // Glosa herdada: só sai da conta. Naquele arquivo a marcação foi achatada na exportação —
+  // virou tinta na página e não existe mais como objeto que dê para apagar.
   const removerGlosa = (item) => {
     const doc = getActive(); if (!doc) return;
-    if (item.ann) { delete item.ann.glosa; delete item.ann.glosaQtd; delete item.ann.glosaUnit; }
-    else if (doc.herdado) {
-      const alvo = item.tipo === "adm" ? "adm" : "tec";
-      const lista = doc.herdado[alvo] || [];
-      const i = lista.findIndex((h) => h.p === item.pagina && h.v === item.valor);
-      if (i >= 0) lista.splice(i, 1);
+    if (!item.ann) {
+      if (doc.herdado) {
+        const alvo = item.tipo === "adm" ? "adm" : "tec";
+        const lista = doc.herdado[alvo] || [];
+        const i = lista.findIndex((h) => h.p === item.pagina && h.v === item.valor);
+        if (i >= 0) lista.splice(i, 1);
+      }
+      doc.saved = false; tick();
+      return;
     }
-    doc.saved = false; tick();
+    const oQue = item.tipo === "adm"
+      ? `a glosa de R$ ${moeda(item.valor)}`
+      : `o traço da glosa técnica de R$ ${moeda(item.valor)}`;
+    // confirma porque apaga da página e o Ctrl+Z não alcança: ele desfaz a última marcação
+    // da página, não uma escolhida no meio da lista
+    showConfirm("Apagar glosa",
+      `Apagar ${oQue} da página ${item.pagina}? A marcação sai do documento.`,
+      () => {
+        const lista = doc.annotations[item.pagina] || [];
+        doc.annotations[item.pagina] = lista.filter((a) => a !== item.ann);
+        doc.saved = false;
+        setSelectedId(null); drawOverlay(); tick();
+      }, { confirmText: "Apagar" });
   };
   const inserirResumo = () => {
     const doc = getActive(); if (!doc) return;
@@ -2158,6 +2329,13 @@ export default function EditorAuditoria({ usuario, onSair }) {
               end: { x: a.x + seg[1].x, y: H - a.y - seg[1].y },
               thickness: th, color: hexRgb(a.color), lineCap: LineCapStyle.Round,
             });
+        } else if (a.type === "cover") {
+          // opaco e sem borda: o contorno tracejado da tela é só guia de edição.
+          // Cobre, não apaga — o texto por baixo continua no conteúdo do PDF.
+          pageObj.drawRectangle({
+            x: a.x, y: H - a.y - a.h, width: a.w, height: a.h,
+            color: hexRgb(a.color || "#ffffff"),
+          });
         } else if (a.type === "highlight") {
           const x = Math.min(a.x1, a.x2), w = Math.abs(a.x2 - a.x1);
           const yTop = Math.min(a.y1, a.y2), h = Math.abs(a.y2 - a.y1);
@@ -2605,8 +2783,21 @@ export default function EditorAuditoria({ usuario, onSair }) {
                 {/* camada de linhas, textos, carimbos e símbolos (pointer-events só nos elementos) */}
                 <div className="absolute top-0 left-0 w-full h-full" style={{ pointerEvents: "none" }}>
                   {(active.annotations[page] || [])
-                    .filter((a) => a.type === "text" || a.type === "stamp" || a.type === "symbol" || a.type === "strike")
-                    .map((a) => a.type === "strike" ? (
+                    .filter((a) => a.type === "text" || a.type === "stamp" || a.type === "symbol"
+                      || a.type === "strike" || a.type === "cover")
+                    .map((a) => a.type === "cover" ? (
+                      <CoverBox
+                        key={a.id}
+                        a={a}
+                        scale={scale}
+                        selected={selectedId === a.id}
+                        interactive={!isDrawTool}
+                        onMove={(x, y) => moveText(a.id, x, y)}
+                        onResize={(w, h) => resizeStamp(a.id, w, h)}
+                        onSelect={() => setSelectedId(a.id)}
+                        onDelete={() => deleteText(a.id)}
+                      />
+                    ) : a.type === "strike" ? (
                       <LineBox
                         key={a.id}
                         a={a}
