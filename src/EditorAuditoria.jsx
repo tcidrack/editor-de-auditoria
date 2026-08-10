@@ -1099,7 +1099,7 @@ function TrocarSenha({ onFechar }) {
   );
 }
 
-export default function EditorAuditoria({ usuario, onSair }) {
+export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) {
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
   const papel = PAPEIS[usuario.papel] || {};
   const carimbaDoc = usaCarimbo(usuario); // técnico assina; administrativo não
@@ -1155,6 +1155,7 @@ export default function EditorAuditoria({ usuario, onSair }) {
   // ---- rascunho automático ----
   const persistir = useRef(false);   // desligado se o IndexedDB falhou ou outra aba é a dona
   const bootFeito = useRef(false);   // <StrictMode> monta 2× em dev: o boot roda uma só vez
+  const montagens = useRef(0);       // distingue a remontagem do StrictMode da saída de verdade
   const autosave = useRef({ timer: 0, ultimo: 0 });
   const ordemSeq = useRef(0);        // ordem da fila, estável entre sessões
   const avisouFalha = useRef(false); // o aviso de falha aparece no máximo uma vez
@@ -2020,6 +2021,11 @@ export default function EditorAuditoria({ usuario, onSair }) {
   // mesmos registros e a última gravação apagaria as marcações da outra — em silêncio,
   // que é o pior modo de falha possível aqui.
   const canal = useRef(null);
+  // fecha o canal e solta o listener. Chamado no pagehide E na desmontagem: sem a segunda
+  // parte, um editor desmontado (troca de auditor, sessão caída) continuava respondendo
+  // "ocupado" para a instância seguinte, que subia com persistir=false — autosave desligado
+  // em silêncio, justo em quem acabou de levar um susto.
+  const fecharCanal = useRef(() => {});
   const reivindicarAba = () => new Promise((resolve) => {
     let livre = true;
     try {
@@ -2036,7 +2042,15 @@ export default function EditorAuditoria({ usuario, onSair }) {
       };
       ch.postMessage({ tipo: "ola" });
       setTimeout(() => resolve(livre), 250);
-      window.addEventListener("pagehide", () => { try { ch.close(); } catch { /* já fechado */ } });
+      const aoSair = () => { try { ch.close(); } catch { /* já fechado */ } };
+      window.addEventListener("pagehide", aoSair);
+      fecharCanal.current = () => {
+        window.removeEventListener("pagehide", aoSair);
+        persistir.current = false; // não grava mais nada depois de largar o canal
+        aoSair();
+        canal.current = null;
+        fecharCanal.current = () => {};
+      };
     } catch { resolve(true); }
   });
 
@@ -2099,6 +2113,7 @@ export default function EditorAuditoria({ usuario, onSair }) {
   };
 
   useEffect(() => {
+    montagens.current++;
     if (bootFeito.current) return; // <StrictMode> monta 2× em dev
     bootFeito.current = true;
     (async () => {
@@ -2166,6 +2181,14 @@ export default function EditorAuditoria({ usuario, onSair }) {
           semBackdrop: true, // um clique fora não pode descartar o trabalho
         });
     })();
+    // Largar o canal na desmontagem, mas SÓ numa desmontagem de verdade: em dev o
+    // <StrictMode> desmonta e remonta na sequência, e o boot não roda de novo (bootFeito),
+    // então fechar aqui deixaria o editor sem autosave a manhã inteira. A remontagem
+    // incrementa o contador antes deste timeout rodar; a saída para valer, não.
+    return () => {
+      const meu = montagens.current;
+      setTimeout(() => { if (montagens.current === meu) fecharCanal.current(); }, 0);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2451,12 +2474,15 @@ export default function EditorAuditoria({ usuario, onSair }) {
     undo, redoAction, prevPage, nextPage, nudgeSelected, deleteText, editingId, selectedId,
     selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
     goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
-    escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta,
+    escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta, bloqueado,
     modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec),
   };
   useEffect(() => {
     const h = (e) => {
       if (!e.key) return; // eventos sintéticos/IME podem chegar sem key
+      // sessão caída: o editor está montado só para não perder o trabalho, atrás da
+      // sobreposição de reentrada. Nada aqui pode responder por baixo dela.
+      if (kb.current.bloqueado) return;
       // não interferir enquanto o usuário digita num campo
       const t = e.target;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;

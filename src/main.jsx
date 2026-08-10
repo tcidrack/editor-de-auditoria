@@ -47,9 +47,14 @@ createRoot(document.getElementById("root")).render(
     <ErroFatal>
       {/* o boundary fica por fora: erro na tela de login também precisa cair nele.
           key={usuario.id} força remontagem limpa na troca de auditor — sem isso, a fila de
-          documentos e os carimbos do anterior continuariam em memória. */}
+          documentos e os carimbos do anterior continuariam em memória.
+          bloqueado: a sessão caiu e o portão pôs a sobreposição de reentrada por cima. O
+          editor continua montado de propósito (o trabalho não se perde), mas não pode
+          responder a atalhos de teclado por baixo de um formulário de login. */}
       <PortaoLogin>
-        {(usuario, sair) => <EditorAuditoria key={usuario.id} usuario={usuario} onSair={sair} />}
+        {(usuario, sair, bloqueado) => (
+          <EditorAuditoria key={usuario.id} usuario={usuario} onSair={sair} bloqueado={bloqueado} />
+        )}
       </PortaoLogin>
     </ErroFatal>
   </StrictMode>

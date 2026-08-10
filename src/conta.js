@@ -18,7 +18,15 @@ const ANON_SB = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 // sem as variáveis o app não pode explodir na importação: a tela mostra o recado e pronto
 export const configurado = !!(URL_SB && ANON_SB);
-const sb = configurado ? createClient(URL_SB, ANON_SB) : null;
+// as opções são as mesmas do padrão, escritas à mão porque a sessão do auditor depende
+// delas: sem persistSession o trabalho morre em cada F5, sem autoRefreshToken o token
+// vence no meio da auditoria. detectSessionInUrl é o único desligado — o login aqui é
+// e-mail e senha, e deixá-lo ligado faz o auth-js caçar tokens em toda URL aberta.
+const sb = configurado
+  ? createClient(URL_SB, ANON_SB, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+    })
+  : null;
 
 const BUCKET = "carimbos";
 const caminhoCarimbo = (userId) => `${userId}/carimbo.png`;
@@ -52,22 +60,29 @@ export const entrar = async (email, senha) => {
 
 export const sair = async () => { if (sb) await sb.auth.signOut(); };
 
+// nunca lança: o portão espera por esta promessa para sair do "Verificando o acesso…", e
+// uma rejeição aqui deixaria a tela travada nesse recado para sempre
 export const sessaoAtual = async () => {
   if (!sb) return null;
-  const { data } = await sb.auth.getSession();
-  return (data && data.session && data.session.user) || null;
+  try {
+    const { data } = await sb.auth.getSession();
+    return (data && data.session && data.session.user) || null;
+  } catch { return null; }
 };
 
-// devolve a função de cancelar, para o efeito do portão se desinscrever
+// devolve a função de cancelar, para o efeito do portão se desinscrever.
+// O evento vai junto porque nem todo aviso é uma troca de usuário: o auth-js dispara
+// SIGNED_IN a cada vez que a aba volta a ficar visível e TOKEN_REFRESHED a cada renovação.
+// Tratar esses como login novo foi o que deslogava quem voltava de uma suspensão.
 export const aoMudarSessao = (cb) => {
   if (!sb) return () => {};
-  const { data } = sb.auth.onAuthStateChange((_evento, sessao) => cb((sessao && sessao.user) || null));
+  const { data } = sb.auth.onAuthStateChange((evento, sessao) => cb(evento, (sessao && sessao.user) || null));
   return () => { try { data.subscription.unsubscribe(); } catch { /* já cancelado */ } };
 };
 
-// troca a senha de quem está logado. Exige a senha atual de propósito: a sessão não expira
-// sozinha, então sem isso quem passasse por uma máquina destravada tomaria a conta do colega.
-// (O cadastro segue fechado — isto muda senha, não cria conta.)
+// troca a senha de quem está logado. Exige a senha atual de propósito: a sessão só cai
+// quando o refresh é recusado, então sem isso quem passasse por uma máquina destravada
+// tomaria a conta do colega. (O cadastro segue fechado — isto muda senha, não cria conta.)
 export const trocarSenha = async (senhaAtual, novaSenha) => {
   if (!sb) return { erro: "Supabase não configurado." };
   const { data } = await sb.auth.getUser();
@@ -81,12 +96,20 @@ export const trocarSenha = async (senhaAtual, novaSenha) => {
 };
 
 // ---- perfil (nome e papel) ----
-// o papel vem do banco, não do bundle: é o que impede alguém de se promover no devtools
+// o papel vem do banco, não do bundle: é o que impede alguém de se promover no devtools.
+//
+// Devolve { perfil } | { semPerfil: true } | { erro }. As duas falhas são MUITO diferentes:
+// "não há linha em perfis" é cadastro faltando e o auditor precisa chamar quem administra;
+// "a requisição falhou" é rede — e tratar rede como conta inválida foi o que jogava quem
+// voltava de uma suspensão para a tela de login com a sessão intacta.
+// .maybeSingle() em vez de .single() justamente por isso: com ele, zero linhas devolve
+// data null SEM erro, e qualquer error que chegue aqui é falha de verdade.
 export const lerPerfil = async (userId) => {
-  if (!sb) return null;
-  const { data, error } = await sb.from("perfis").select("nome, papel").eq("id", userId).single();
-  if (error || !data) return null;
-  return { id: userId, nome: data.nome, papel: data.papel };
+  if (!sb) return { erro: "Supabase não configurado." };
+  const { data, error } = await sb.from("perfis").select("nome, papel").eq("id", userId).maybeSingle();
+  if (error) return { erro: traduzir(error.message) };
+  if (!data) return { semPerfil: true };
+  return { perfil: { id: userId, nome: data.nome, papel: data.papel } };
 };
 
 // ---- carimbo (bucket privado, uma pasta por usuário) ----
