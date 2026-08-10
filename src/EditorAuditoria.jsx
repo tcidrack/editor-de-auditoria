@@ -41,7 +41,7 @@ const classeGlosa = (hex) => {
 };
 
 // ---- ferramentas e atalhos ----
-// a ordem desta lista É a numeração das teclas 1..7 (toolbar e teclado leem daqui)
+// a ordem desta lista É a numeração das teclas 1..8 (toolbar e teclado leem daqui)
 const FERRAMENTAS = [
   { id: "pen", label: "Desenho", Icon: Pencil },
   { id: "line", label: "Linha", Icon: Minus },
@@ -2612,12 +2612,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         </div>
       </div>
 
-      {/* toolbar (compacta no celular: só ícones, quebra linha se precisar) */}
-      <header className="flex flex-wrap items-center gap-2 md:gap-3 px-2 md:px-4 py-2 bg-[var(--surface)] border-y border-[var(--border)] shadow-sm z-10">
-        <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
+      {/* toolbar (compacta no celular: só ícones, quebra linha se precisar)
+          flex-wrap em CADA grupo, não só no header: um grupo com shrink-0 e conteúdo que não
+          quebra tem largura intrínseca fixa, e as 8 ferramentas + o carimbo somavam 415px —
+          mais do que qualquer celular tem. O carimbo, último da fila, saía da tela. */}
+      <header className="flex flex-wrap items-center gap-1.5 sm:gap-2 md:gap-3 px-2 md:px-4 py-2 bg-[var(--surface)] border-y border-[var(--border)] shadow-sm z-10">
+        <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
           {FERRAMENTAS.map(({ id, label, Icon }, i) => (
             <button key={id} onClick={() => selectTool(id)} title={`${label} (${i + 1})`}
-              className={"flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
+              className={"flex items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
                 (tool === id
                   ? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
                   : "bg-[var(--surface)] border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]")}>
@@ -2626,7 +2629,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           ))}
           <button onClick={abrirCarimbos} title="Carimbo (C)"
             disabled={!active}
-            className={"flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap disabled:opacity-40 " +
+            className={"flex items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap disabled:opacity-40 " +
               (stampsOpen
                 ? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
                 : "bg-[var(--surface)] border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]")}>
@@ -2635,11 +2638,11 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         </div>
 
         {/* tipo de glosa — a cor É a classificação, por isso só estas duas */}
-        <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
+        <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
           <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Glosa</span>
           {CORES.map(({ id, hex, label, title }) => (
             <button key={id} onClick={() => setColor(hex)} title={title}
-              className={"flex items-center gap-1.5 px-2 md:px-2.5 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
+              className={"flex items-center gap-1.5 px-1.5 sm:px-2 md:px-2.5 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
                 (color === hex
                   ? "bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]"
                   : "bg-[var(--surface)] border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]")}>
@@ -2650,7 +2653,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           ))}
         </div>
 
-        <div className="flex shrink-0 items-center gap-2 pr-2 md:pr-3 border-r border-[var(--border)]">
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 pr-2 md:pr-3 border-r border-[var(--border)]">
           <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Espessura</span>
           <input type="range" min="1" max="5" step="0.5" value={thickness}
             onChange={(e) => setThickness(parseFloat(e.target.value))} className="w-16 md:w-20"
@@ -2659,7 +2662,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         </div>
 
         {/* seletor do símbolo de check (✓ / ✗) — usado pela ferramenta Check */}
-        <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
+        <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
           <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Marca</span>
           {[
             { id: "check", Icon: Check, title: "Marca de certo (✓) — tecla X alterna" },
@@ -2676,23 +2679,23 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           ))}
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
+        <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
           <button onClick={undo} disabled={!hasMarks} title="Desfazer (Ctrl+Z)"
-            className="flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
+            className="flex items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
             <Undo2 className="w-4 h-4" /><span className="hidden sm:inline">Desfazer</span>
           </button>
           <button onClick={redoAction} disabled={redo.current.length === 0} title="Refazer (Ctrl+Y)"
-            className="flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
+            className="flex items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
             <Redo2 className="w-4 h-4" /><span className="hidden sm:inline">Refazer</span>
           </button>
           <button onClick={clearPage} disabled={!hasMarks} title="Limpar página"
-            className="flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
+            className="flex items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40 whitespace-nowrap">
             <Trash2 className="w-4 h-4" /><span className="hidden sm:inline">Limpar página</span>
           </button>
         </div>
 
         <button onClick={saveOne} disabled={!active || saving} title="Salvar este (Ctrl+S)"
-          className="flex shrink-0 items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40 whitespace-nowrap">
+          className="flex shrink-0 items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40 whitespace-nowrap">
           <Save className="w-4 h-4" /><span className="hidden sm:inline">Salvar este</span>
         </button>
       </header>

@@ -2,6 +2,12 @@
 .app-shell {
   height: 100vh;   /* fallback navegadores antigos */
   height: 100dvh;
+  /* trava contra rolagem lateral: nada aqui dentro pode empurrar a página para o lado.
+     `clip` e não `hidden` de propósito — `overflow-x: hidden` obriga o overflow-y a virar
+     `auto` e criaria uma barra vertical parasita neste shell de altura fixa.
+     Não atinge a gaveta nem os modais: overflow não cria bloco de contenção para
+     position:fixed, e o main tem o overflow-auto dele (o PDF ampliado segue rolando). */
+  overflow-x: clip;
 }
 .app-footer {
   padding-bottom: calc(0.375rem + env(safe-area-inset-bottom)); /* área do "home" do iPhone */
