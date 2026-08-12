@@ -11,7 +11,8 @@ import "./EditorAuditoria.css";
 // bibliotecas auto-hospedadas (empacotadas no bundle — sem CDN de terceiros)
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
-import { PDFDocument, rgb, StandardFonts, LineCapStyle } from "pdf-lib";
+import { PDFDocument, rgb, StandardFonts, LineCapStyle,
+  pushGraphicsState, popGraphicsState, concatTransformationMatrix } from "pdf-lib";
 import JSZip from "jszip";
 import * as rascunho from "./rascunho";
 import { PAPEIS, usaCarimbo, lerCarimbo, salvarCarimbo, apagarCarimbo, trocarSenha } from "./conta";
@@ -272,8 +273,29 @@ function RoundBtn({ style, title, onAction, bg, children }) {
   );
 }
 
+// etiqueta do tamanho atual, ao lado da caixa, só enquanto a alça está sendo arrastada
+function TagTamanho({ children }) {
+  return (
+    <div style={{
+      position: "absolute", top: -26, left: "50%", transform: "translateX(-50%)",
+      padding: "2px 7px", borderRadius: 10, whiteSpace: "nowrap",
+      background: "rgba(17,24,39,.9)", color: "#fff", fontSize: 11, fontWeight: 700,
+      lineHeight: "16px", pointerEvents: "none", zIndex: 4,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+// Sensibilidade das alças de redimensionar: pixels de arrasto na tela por ponto de
+// tamanho. As alças multiplicavam o tamanho pela razão das distâncias até o centro da
+// caixa; numa caixa pequena (meia diagonal ~28px) um arrasto de 60px triplicava a fonte,
+// e foi assim que uma conta de corpo 7pt recebeu marcação de 37pt. Somar o deslocamento
+// em vez de multiplicar tira o salto e mantém o controle fino.
+const PX_POR_PONTO = 4;
+
 // ---- caixa de texto editável, móvel e redimensionável (estilo Canva) ----
-function TextBox({ a, scale, editing, selected, interactive, onChange, onMove,
+function TextBox({ a, scale, tetoFonte, editing, selected, interactive, onChange, onMove,
   onResize, onMeasure, onStartEdit, onEndEdit, onSelect, onDelete, onCancel, onDuplicate }) {
   const boxRef = useRef(null);
   const inputRef = useRef(null);
@@ -281,6 +303,7 @@ function TextBox({ a, scale, editing, selected, interactive, onChange, onMove,
   const rez = useRef(null);
 
   const [hover, setHover] = useState(false);
+  const [redim, setRedim] = useState(false); // mostra o tamanho em pt enquanto arrasta
 
   // foca ao entrar em edição (após o DOM assentar, evita blur imediato)
   useEffect(() => {
@@ -317,20 +340,24 @@ function TextBox({ a, scale, editing, selected, interactive, onChange, onMove,
   const endDrag = () => { drag.current = null; measure(); };
 
   // ---- redimensionar o tamanho da fonte (arrastar alça no canto) ----
+  // ver PX_POR_PONTO: soma o deslocamento, não multiplica pela razão de distâncias
   const startResize = (e) => {
     e.stopPropagation();
     const r = boxRef.current.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     rez.current = { cx, cy, startSize: a.size,
-      startDist: Math.hypot(e.clientX - cx, e.clientY - cy) || 1 };
+      startDist: Math.hypot(e.clientX - cx, e.clientY - cy) };
+    setRedim(true);
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const moveResize = (e) => {
     const rc = rez.current; if (!rc) return;
     const dist = Math.hypot(e.clientX - rc.cx, e.clientY - rc.cy);
-    onResize(Math.max(6, Math.min(200, rc.startSize * (dist / rc.startDist))));
+    // /scale para o arrasto valer os mesmos pontos em qualquer zoom
+    const novo = rc.startSize + (dist - rc.startDist) / (PX_POR_PONTO * scale);
+    onResize(Math.max(6, Math.min(tetoFonte, novo)));
   };
-  const endResize = () => { if (rez.current) { rez.current = null; measure(); } };
+  const endResize = () => { if (rez.current) { rez.current = null; setRedim(false); measure(); } };
 
   const commonStyle = {
     position: "absolute",
@@ -412,6 +439,8 @@ function TextBox({ a, scale, editing, selected, interactive, onChange, onMove,
             style={{ top: -10, left: -10 }}>
             <Copy style={{ width: 12, height: 12, margin: "0 auto" }} />
           </RoundBtn>
+          {/* tamanho em pt enquanto arrasta: o exagero fica visível antes de exportar */}
+          {redim && <TagTamanho>{Math.round(a.size)} pt</TagTamanho>}
           {handles.map((h) => (
             <div
               key={h.key}
@@ -447,7 +476,7 @@ function TextBox({ a, scale, editing, selected, interactive, onChange, onMove,
 }
 
 // ---- carimbo inserido no PDF: mover, redimensionar (proporção fixa) e excluir ----
-function StampBox({ a, scale, selected, interactive, onMove, onResize, onSelect, onDelete, onDuplicate }) {
+function StampBox({ a, scale, tetoLargura, selected, interactive, onMove, onResize, onSelect, onDelete, onDuplicate }) {
   const boxRef = useRef(null);
   const drag = useRef(null);
   const rez = useRef(null);
@@ -467,18 +496,20 @@ function StampBox({ a, scale, selected, interactive, onMove, onResize, onSelect,
   };
   const endDrag = () => { drag.current = null; };
 
+  // ver PX_POR_PONTO: soma o deslocamento, não multiplica pela razão de distâncias
   const startResize = (e) => {
     e.stopPropagation();
     const r = boxRef.current.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     rez.current = { cx, cy, w0: a.w, h0: a.h,
-      d0: Math.hypot(e.clientX - cx, e.clientY - cy) || 1 };
+      d0: Math.hypot(e.clientX - cx, e.clientY - cy) };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const moveResize = (e) => {
     const rc = rez.current; if (!rc) return;
-    const k = Math.hypot(e.clientX - rc.cx, e.clientY - rc.cy) / rc.d0;
-    const w = Math.max(24, Math.min(600, rc.w0 * k));
+    // o carimbo é grande, então cada px de arrasto vale 2pt de largura (sem amortecer)
+    const d = (Math.hypot(e.clientX - rc.cx, e.clientY - rc.cy) - rc.d0) / scale;
+    const w = Math.max(24, Math.min(tetoLargura, rc.w0 + d * 2));
     onResize(w, w * (rc.h0 / rc.w0)); // mantém a proporção
   };
   const endResize = () => { rez.current = null; };
@@ -623,11 +654,12 @@ function CoverBox({ a, scale, selected, interactive, onMove, onResize, onSelect,
 
 // ---- símbolo ✓ / ✗ (marca de verificado): mover, redimensionar e excluir ----
 // desenhado como vetor (SVG na tela, drawLine no PDF) — nítido em qualquer zoom
-function SymbolBox({ a, scale, selected, interactive, onMove, onResize, onSelect, onDelete, onDuplicate }) {
+function SymbolBox({ a, scale, tetoFonte, selected, interactive, onMove, onResize, onSelect, onDelete, onDuplicate }) {
   const boxRef = useRef(null);
   const drag = useRef(null);
   const rez = useRef(null);
   const [hover, setHover] = useState(false);
+  const [redim, setRedim] = useState(false); // mostra o tamanho em pt enquanto arrasta
   const px = a.size * scale;
 
   const startDrag = (e) => {
@@ -644,20 +676,24 @@ function SymbolBox({ a, scale, selected, interactive, onMove, onResize, onSelect
   };
   const endDrag = () => { drag.current = null; };
 
+  // ver PX_POR_PONTO: soma o deslocamento, não multiplica pela razão de distâncias
   const startResize = (e) => {
     e.stopPropagation();
     const r = boxRef.current.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     rez.current = { cx, cy, startSize: a.size,
-      startDist: Math.hypot(e.clientX - cx, e.clientY - cy) || 1 };
+      startDist: Math.hypot(e.clientX - cx, e.clientY - cy) };
+    setRedim(true);
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const moveResize = (e) => {
     const rc = rez.current; if (!rc) return;
     const dist = Math.hypot(e.clientX - rc.cx, e.clientY - rc.cy);
-    onResize(Math.max(10, Math.min(200, rc.startSize * (dist / rc.startDist))));
+    const novo = rc.startSize + (dist - rc.startDist) / (PX_POR_PONTO * scale);
+    // o ✓/✗ é um sinal de conferência: pode passar um pouco do teto do texto
+    onResize(Math.max(10, Math.min(tetoFonte * 2, novo)));
   };
-  const endResize = () => { rez.current = null; };
+  const endResize = () => { if (rez.current) { rez.current = null; setRedim(false); } };
 
   const Icon = a.symbol === "cross" ? X : Check;
   const showBox = selected || hover;
@@ -697,6 +733,7 @@ function SymbolBox({ a, scale, selected, interactive, onMove, onResize, onSelect
             style={{ top: -10, left: -10 }}>
             <Copy style={{ width: 12, height: 12, margin: "0 auto" }} />
           </RoundBtn>
+          {redim && <TagTamanho>{Math.round(a.size)} pt</TagTamanho>}
           {handles.map((h) => (
             <div
               key={h.key}
@@ -1235,6 +1272,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
 
   // ferramentas de desenho/marcação: enquanto ativas, as caixas DOM ficam não-interativas
   const isDrawTool = ["pen", "line", "highlight", "check", "eraser", "ocr", "cover"].includes(tool);
+
+  // Tetos das alças de redimensionar, ancorados no papel e não no zoom: ~22pt de fonte
+  // (em A4, proporcional em papel maior) e 60% da largura da página para o carimbo.
+  // Em pt: é o tamanho que vai para o PDF, não o que aparece na tela.
+  const cv = baseRef.current;
+  const larguraPapel = cv ? cv.width / scale : 595;
+  const menorLado = cv ? Math.min(cv.width, cv.height) / scale : 595;
+  const tetoFonte = Math.max(12, Math.round(22 * (menorLado / 595)));
+  const tetoLargura = Math.round(larguraPapel * 0.6);
 
   // ---- borracha: acha a anotação sob o ponto (de cima p/ baixo) ----
   const hitAnnotation = (p) => {
@@ -2331,45 +2377,57 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       return img;
     };
     for (const [pg, list] of Object.entries(d.annotations)) {
-      const pageObj = pages[pg - 1]; if (!pageObj) continue;
-      const H = pageObj.getHeight();
+      const pageObj = pages[pg - 1]; if (!pageObj || !list || !list.length) continue;
+      // O editor marca em cima do que o pdf.js desenha, e o getViewport APLICA o /Rotate
+      // da página: numa página deitada a tela é 842×595, não 595×842. O pdf-lib desenha
+      // no espaço da página sem rotação. Sem a matriz abaixo, a marcação sai transposta
+      // e o que passa da largura do papel cai fora da folha.
+      const W = pageObj.getWidth(), H = pageObj.getHeight(); // MediaBox: ignora /Rotate
+      let rot = ((pageObj.getRotation().angle % 360) + 360) % 360;
+      if (rot % 90) rot = 0;                                 // /Rotate torto: trata como 0
+      const VH = (rot === 90 || rot === 270) ? W : H;        // altura do viewport da tela
+      // leva o espaço do viewport (y para cima) ao espaço da página
+      const M = { 90: [0, 1, -1, 0, W, 0], 180: [-1, 0, 0, -1, W, H], 270: [0, -1, 1, 0, 0, H] }[rot];
+      // cada draw* do pdf-lib já se envolve no próprio q…Q, então todos ficam aninhados
+      // aqui dentro e herdam a matriz. Página em pé não recebe operador nenhum.
+      if (M) pageObj.pushOperators(pushGraphicsState(), concatTransformationMatrix(...M));
       for (const a of list) {
         if (a.type === "strike")
-          pageObj.drawLine({ start: { x: a.x1, y: H - a.y1 }, end: { x: a.x2, y: H - a.y2 }, thickness: a.thickness, color: hexRgb(a.color) });
+          pageObj.drawLine({ start: { x: a.x1, y: VH - a.y1 }, end: { x: a.x2, y: VH - a.y2 }, thickness: a.thickness, color: hexRgb(a.color) });
         else if (a.type === "pen") {
           const pts = a.points || [];
           for (let i = 1; i < pts.length; i++)
             pageObj.drawLine({
-              start: { x: pts[i - 1].x, y: H - pts[i - 1].y },
-              end: { x: pts[i].x, y: H - pts[i].y },
+              start: { x: pts[i - 1].x, y: VH - pts[i - 1].y },
+              end: { x: pts[i].x, y: VH - pts[i].y },
               thickness: a.thickness, color: hexRgb(a.color), lineCap: LineCapStyle.Round,
             });
         } else if (a.type === "symbol") {
           const th = Math.max(1.5, a.size * 0.12);
           for (const seg of symbolSegs(a.symbol, a.size))
             pageObj.drawLine({
-              start: { x: a.x + seg[0].x, y: H - a.y - seg[0].y },
-              end: { x: a.x + seg[1].x, y: H - a.y - seg[1].y },
+              start: { x: a.x + seg[0].x, y: VH - a.y - seg[0].y },
+              end: { x: a.x + seg[1].x, y: VH - a.y - seg[1].y },
               thickness: th, color: hexRgb(a.color), lineCap: LineCapStyle.Round,
             });
         } else if (a.type === "cover") {
           // opaco e sem borda: o contorno tracejado da tela é só guia de edição.
           // Cobre, não apaga — o texto por baixo continua no conteúdo do PDF.
           pageObj.drawRectangle({
-            x: a.x, y: H - a.y - a.h, width: a.w, height: a.h,
+            x: a.x, y: VH - a.y - a.h, width: a.w, height: a.h,
             color: hexRgb(a.color || "#ffffff"),
           });
         } else if (a.type === "highlight") {
           const x = Math.min(a.x1, a.x2), w = Math.abs(a.x2 - a.x1);
           const yTop = Math.min(a.y1, a.y2), h = Math.abs(a.y2 - a.y1);
-          pageObj.drawRectangle({ x, y: H - yTop - h, width: w, height: h, color: hexRgb(a.color || "#ffd600"), opacity: 0.38 });
+          pageObj.drawRectangle({ x, y: VH - yTop - h, width: w, height: h, color: hexRgb(a.color || "#ffd600"), opacity: 0.38 });
         } else if (a.type === "text") {
           // desenha só o texto (sem caixa/borda/fundo), fixo e não editável
           String(a.text || "").split("\n").forEach((ln, i) => {
             if (!ln) return;
             pageObj.drawText(ln, {
               x: a.x + 1,
-              y: H - a.y - a.size * (i + 1), // baseline ~1 tamanho abaixo do topo (casa com a tela)
+              y: VH - a.y - a.size * (i + 1), // baseline ~1 tamanho abaixo do topo (casa com a tela)
               size: a.size,
               font,
               color: hexRgb(a.color),
@@ -2377,9 +2435,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           });
         } else if (a.type === "stamp") {
           const img = await embedStamp(a.url);
-          pageObj.drawImage(img, { x: a.x, y: H - a.y - a.h, width: a.w, height: a.h });
+          pageObj.drawImage(img, { x: a.x, y: VH - a.y - a.h, width: a.w, height: a.h });
         }
       }
+      if (M) pageObj.pushOperators(popGraphicsState());
     }
     gravarGlosas(out, d, usuario);
     // campo Autor: é o que aparece em Arquivo > Propriedades de qualquer leitor de PDF e nos
@@ -2842,6 +2901,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                         key={a.id}
                         a={a}
                         scale={scale}
+                        tetoLargura={tetoLargura}
                         selected={selectedId === a.id}
                         interactive={!isDrawTool}
                         onMove={(x, y) => moveText(a.id, x, y)}
@@ -2855,6 +2915,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                         key={a.id}
                         a={a}
                         scale={scale}
+                        tetoFonte={tetoFonte}
                         selected={selectedId === a.id}
                         interactive={!isDrawTool}
                         onMove={(x, y) => moveText(a.id, x, y)}
@@ -2868,6 +2929,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                         key={a.id}
                         a={a}
                         scale={scale}
+                        tetoFonte={tetoFonte}
                         editing={editingId === a.id}
                         selected={selectedId === a.id}
                         interactive={!isDrawTool}
