@@ -4,14 +4,14 @@ import {
   FilePlus, Folder, Undo2, Trash2, Save, Download,
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
-  Keyboard, LogOut, KeyRound, Settings, Square,
+  Keyboard, LogOut, KeyRound, Settings, Square, RotateCcw, RotateCw,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
 // bibliotecas auto-hospedadas (empacotadas no bundle — sem CDN de terceiros)
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
-import { PDFDocument, rgb, StandardFonts, LineCapStyle,
+import { PDFDocument, rgb, StandardFonts, LineCapStyle, degrees,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix } from "pdf-lib";
 import JSZip from "jszip";
 import * as rascunho from "./rascunho";
@@ -254,6 +254,60 @@ const limparCarimbosAntigos = () => {
   } catch { /* sem localStorage não há o que limpar */ }
 };
 
+// ---- giro de página ----
+// Digitalização deitada dentro de folha em pé é rotina nos lotes que chegam. O auditor
+// gira a página; o giro é RELATIVO ao /Rotate que o PDF já traz e vale na tela e na
+// exportação. Página sem entrada em doc.rotacoes = sem giro.
+const giroDaPagina = (doc, pg) =>
+  (doc && doc.rotacoes && doc.rotacoes[pg]) || 0;
+
+// Leva um ponto do espaço de tela ANTES do giro para o espaço DEPOIS dele.
+// Wv/Hv são as dimensões do viewport antes de girar; em ±90 elas trocam de lugar.
+const giraPonto = (x, y, delta, Wv, Hv) =>
+  delta === 90 ? { x: Hv - y, y: x }
+    : delta === 270 ? { x: y, y: Wv - x }
+      : { x: Wv - x, y: Hv - y };            // 180
+
+// Gira as marcações já feitas na página, para elas continuarem coladas no conteúdo.
+//
+// Traço, linha e realce são geometria pura e giram junto. Texto, símbolo e carimbo são
+// caixas que o editor sempre desenha alinhadas à tela: giram de posição (pelo centro,
+// que é o que não se mexe do lugar) mas mantêm a própria forma — depois do giro a nota
+// continua legível, que é o que se espera de uma nota.
+const girarAnns = (lista, delta, Wv, Hv) => {
+  const d = ((delta % 360) + 360) % 360;
+  if (!d || !lista) return;
+  const troca = d !== 180;                  // em ±90 largura e altura trocam
+  // gira a caixa pelo centro e devolve o novo canto superior-esquerdo
+  const porCentro = (a, w, h) => {
+    const c = giraPonto(a.x + w / 2, a.y + h / 2, d, Wv, Hv);
+    return { x: c.x - w / 2, y: c.y - h / 2 };
+  };
+  for (const a of lista) {
+    if (a.type === "pen") {
+      a.points = (a.points || []).map((p) => giraPonto(p.x, p.y, d, Wv, Hv));
+    } else if (a.type === "strike" || a.type === "highlight") {
+      const p1 = giraPonto(a.x1, a.y1, d, Wv, Hv);
+      const p2 = giraPonto(a.x2, a.y2, d, Wv, Hv);
+      a.x1 = p1.x; a.y1 = p1.y; a.x2 = p2.x; a.y2 = p2.y;
+    } else if (a.type === "cover" || a.type === "stamp") {
+      // corretivo e carimbo cobrem uma área do documento: a área tem de girar junto,
+      // então aqui a caixa troca de lado além de mudar de lugar.
+      const p1 = giraPonto(a.x, a.y, d, Wv, Hv);
+      const p2 = giraPonto(a.x + a.w, a.y + a.h, d, Wv, Hv);
+      a.x = Math.min(p1.x, p2.x); a.y = Math.min(p1.y, p2.y);
+      if (troca) { const t = a.w; a.w = a.h; a.h = t; }
+    } else if (a.type === "symbol") {
+      const p = porCentro(a, a.size, a.size);
+      a.x = p.x; a.y = p.y;
+    } else if (a.type === "text") {
+      // w/h da caixa de texto são medidos na tela (ver TextBox.measure) e não giram:
+      // o texto continua correndo na horizontal, só a caixa muda de lugar.
+      const p = porCentro(a, a.w || 0, a.h || 0);
+      a.x = p.x; a.y = p.y;
+    }
+  }
+};
 
 // botão redondo (× fechar / excluir)
 function RoundBtn({ style, title, onAction, bg, children }) {
@@ -1150,6 +1204,9 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const [activeId, setActiveId] = useState(null);
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState("1"); // campo "ir para página" do rodapé
+  // contador que força o re-render da página ao girar: doc.rotacoes vive no store.current
+  // (ref, não reativo). Usar `rev` aqui redesenharia a página inteira a cada traço.
+  const [giroRev, setGiroRev] = useState(0);
   const [scale, setScale] = useState(1.3);
   const [tool, setTool] = useState("pen");
   // a cor padrão sai do papel; os dois botões seguem disponíveis para os dois papéis
@@ -1258,6 +1315,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         totalConta: doc.totalConta || "", herdado: doc.herdado || null,
         keywordsOriginais: doc.keywordsOriginais || "",
         metaLida: !!doc.metaLida, semBinario: !!doc.semBinario,
+        rotacoes: doc.rotacoes || {},
         annotations, atualizadoEm: Date.now(),
       });
     } catch { /* gravar rascunho nunca pode interromper a marcação em andamento */ }
@@ -1354,17 +1412,20 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       }
       const pageObj = await doc.pdfDoc.getPage(page);
       if (cancelled) return;
+      // giro do auditor (ver girarPagina): o `rotation` do getViewport é ABSOLUTO, então
+      // soma-se ao /Rotate que a página já traz em vez de substituí-lo.
+      const rotacao = pageObj.rotate + giroDaPagina(doc, page);
       // auto-fit: na 1ª abertura do doc, ajusta o zoom à largura disponível (celular)
       if (!doc.autoFit) {
         doc.autoFit = true;
         const avail = mainRef.current ? mainRef.current.clientWidth - 32 : 0;
         if (avail > 0) {
-          const vp1 = pageObj.getViewport({ scale: 1 });
+          const vp1 = pageObj.getViewport({ scale: 1, rotation: rotacao });
           const fit = Math.min(1.3, Math.max(0.5, avail / vp1.width));
           if (fit < scale - 0.01) { setScale(fit); return; } // re-renderiza com o novo zoom
         }
       }
-      const vp = pageObj.getViewport({ scale });
+      const vp = pageObj.getViewport({ scale, rotation: rotacao });
       const b = baseRef.current, o = overlayRef.current;
       if (!b || !o) return;
       b.width = o.width = Math.floor(vp.width);
@@ -1381,7 +1442,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, activeId, page, scale]);
+  }, [ready, activeId, page, scale, giroRev]);
 
   // ---- rascunho: gravação contínua ----
   // Toda mutação passa por tick() (que incrementa rev), então um efeito só cobre tudo.
@@ -1738,7 +1799,9 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     // do recorte (medido neste PDF: 12/20 sem margem → 18/20 com margem + filtro abaixo).
     const S = 6;   // resolução do recorte (S=6 saiu bem melhor que S=4 nos testes)
     const MG = 8;  // margem em pontos ao redor da seleção
-    const vp = pageObj.getViewport({ scale: S });
+    // mesma rotação do render principal: as coords da seleção estão no espaço da tela,
+    // e sem isso o recorte lido pelo tesseract sairia de outro lugar da página
+    const vp = pageObj.getViewport({ scale: S, rotation: pageObj.rotate + giroDaPagina(doc, page) });
     const cv = document.createElement("canvas");
     cv.width = Math.max(1, Math.round((r.w + MG * 2) * S));
     cv.height = Math.max(1, Math.round((r.h + MG * 2) * S));
@@ -2109,6 +2172,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       id: ++seq.current, key: reg.key, name: reg.nome, bytes, pdfDoc: null,
       numPages: reg.numPages || 0, page: reg.page || 1,
       annotations: await restaurarAnns(reg.annotations, cacheImg),
+      rotacoes: reg.rotacoes || {}, // registro gravado antes deste recurso: sem giro nenhum
       saved: false, // se há rascunho, é porque não foi exportado
       totalConta: reg.totalConta || "",
       herdado: reg.herdado || null,
@@ -2270,6 +2334,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       const doc = {
         id: ++seq.current, name: f.name, bytes, pdfDoc: null,
         numPages: 0, page: 1, annotations: {}, saved: false,
+        rotacoes: {},          // página → giro em graus, RELATIVO ao /Rotate que ela já tem
         totalConta: "",        // preenchido na calculadora (ou herdado do PDF)
         herdado: null,         // glosas da etapa anterior, lidas dos metadados
         keywordsOriginais: "", // keywords que o PDF já trazia — preservadas ao exportar
@@ -2358,6 +2423,23 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     setPageInput(String(goToPage(n)));
   };
 
+  // gira SÓ a página aberta, na tela e no PDF exportado (ver girarAnns e buildPdf).
+  // Fica fora do desfazer de propósito: para voltar, basta o botão do outro lado —
+  // misturar giro e marcação na mesma pilha confundiria mais do que ajudaria.
+  const girarPagina = (delta) => {
+    const d = getActive(); if (!d || !d.numPages) return;
+    const cv = baseRef.current; if (!cv) return;
+    // dimensões do viewport ANTES do giro, em pontos do documento
+    const Wv = cv.width / scale, Hv = cv.height / scale;
+    d.rotacoes = d.rotacoes || {};
+    d.rotacoes[page] = ((((d.rotacoes[page] || 0) + delta) % 360) + 360) % 360;
+    girarAnns(d.annotations[page], delta, Wv, Hv);
+    d.saved = false;
+    setSelectedId(null);
+    setGiroRev((n) => n + 1); // re-renderiza a página com a nova rotação
+    tick();                   // e leva o giro para o rascunho
+  };
+
   // ---- exportar ----
   const hexRgb = (h) => {
     const n = parseInt(h.slice(1), 16);
@@ -2376,6 +2458,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       stampCache.set(url, img);
       return img;
     };
+    // O giro das páginas vem PRIMEIRO, e em laço próprio: o laço de marcações abaixo pula
+    // página sem marcação nenhuma, e uma página só endireitada precisa sair endireitada.
+    // Feito aqui, o bloco de matriz corretiva mais abaixo já lê o /Rotate final e põe as
+    // marcações no lugar sozinho.
+    for (const [pg, giro] of Object.entries(d.rotacoes || {})) {
+      const p = pages[pg - 1];
+      if (!p || !giro) continue;
+      p.setRotation(degrees((((p.getRotation().angle + giro) % 360) + 360) % 360));
+    }
     for (const [pg, list] of Object.entries(d.annotations)) {
       const pageObj = pages[pg - 1]; if (!pageObj || !list || !list.length) continue;
       // O editor marca em cima do que o pdf.js desenha, e o getViewport APLICA o /Rotate
@@ -3194,6 +3285,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           </span>
           <button onClick={nextPage} disabled={!active || page >= (active ? active.numPages : 0)} title="Próxima página (PageDown)"
             className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><ChevronRight className="w-4 h-4" /></button>
+        </div>
+        {/* giro: só a página aberta, e vale também no PDF exportado */}
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => girarPagina(-90)} disabled={!active || !active.numPages}
+            title="Girar esta página para a esquerda"
+            className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><RotateCcw className="w-4 h-4" /></button>
+          <button onClick={() => girarPagina(90)} disabled={!active || !active.numPages}
+            title="Girar esta página para a direita"
+            className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><RotateCw className="w-4 h-4" /></button>
         </div>
         <div className="flex-1 hidden md:block" />
         <div className="flex items-center gap-1.5">
