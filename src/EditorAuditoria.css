@@ -86,6 +86,12 @@ input[type="password"]::-ms-clear { display: none; }
 .animated-card:hover::before { opacity: 0.35; }
 .animated-card > * { position: relative; }
 
+/* Enquanto se arrasta um card, o hover não pode mexer em transform: o deslize dos vizinhos
+   escreve transform inline, e no instante em que ele é limpo o hover assumiria e o card daria
+   um pulo. A sombra do hover pode ficar — ela não briga com nada. */
+.arrastando .animated-card:hover { transform: none; }
+.arrastando .animated-card { transition: box-shadow 0.3s ease; }
+
 /* ===== SCROLLBARS ===== */
 .maida-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .maida-scroll::-webkit-scrollbar-track { background: transparent; border-radius: 10px; }

@@ -5,6 +5,7 @@ import {
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
   Keyboard, LogOut, KeyRound, Settings, Square, RotateCcw, RotateCw,
+  ChevronUp, ChevronDown, Combine, GripVertical,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -15,6 +16,8 @@ import { PDFDocument, rgb, StandardFonts, LineCapStyle, degrees,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix } from "pdf-lib";
 import JSZip from "jszip";
 import * as rascunho from "./rascunho";
+import { PREFIXO_GLOSAS, lerGlosasDoPdf, juntarPdfs, deslocarPaginas, somaHerdada } from "./juntar";
+import { useArrastarLista } from "./arrastar";
 import { PAPEIS, usaCarimbo, lerCarimbo, salvarCarimbo, apagarCarimbo, trocarSenha } from "./conta";
 import CampoSenha from "./CampoSenha";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -168,7 +171,8 @@ const calcGlosas = (doc) => {
 // O técnico risca e salva; o analista abre o PDF já riscado. Como as marcações saem
 // achatadas no arquivo, o app não teria como somar a glosa técnica do colega — então ela
 // viaja junto, nas Keywords (campo padrão, que o pdf.js devolve de volta em info.Keywords).
-const PREFIXO_GLOSAS = "maida-glosas:";
+// PREFIXO_GLOSAS e lerGlosasDoPdf moram em src/juntar.js: o script da linha de comando
+// precisa dos mesmos, e três cópias da mesma leitura era pedir para uma delas divergir.
 
 // quem já auditou este documento, na ordem. É lista, e não campo único, porque a auditoria
 // tem duas etapas: o técnico risca e salva, o administrativo abre o PDF já riscado e exporta
@@ -277,19 +281,6 @@ const gravarGlosas = (out, doc, auditor) => {
   out.setKeywords([doc.keywordsOriginais || "", PREFIXO_GLOSAS + JSON.stringify(payload)]
     .filter(Boolean));
 };
-// devolve { herdado, keywordsOriginais } a partir do que o pdf.js leu dos metadados.
-// keywordsOriginais é a string crua anterior à nossa entrada: preserva keywords de terceiros
-// (não dá para separá-las com segurança — o separador é espaço, que também aparece dentro delas).
-const lerGlosasDoPdf = (keywords) => {
-  const bruto = String(keywords || "");
-  const i = bruto.indexOf(PREFIXO_GLOSAS);
-  if (i < 0) return { herdado: null, keywordsOriginais: bruto.trim() };
-  let herdado = null;
-  try { herdado = JSON.parse(bruto.slice(i + PREFIXO_GLOSAS.length)); }
-  catch { /* PDF mexido por fora — segue sem herança */ }
-  return { herdado, keywordsOriginais: bruto.slice(0, i).trim() };
-};
-
 // conversão das anotações para o rascunho — ver src/rascunho.js
 const { serializarAnns, restaurarAnns, dataUrlParaBlob, blobParaDataUrl, hashesDosRegistros } = rascunho;
 
@@ -1245,6 +1236,128 @@ function TrocarSenha({ onFechar }) {
   );
 }
 
+// ---- juntar partes de um processo ----
+// O SEI entrega processo grande partido em vários downloads. Quem audita uma parte e recebe o
+// resto em outro arquivo não tem como somar a glosa das duas — ver src/juntar.js.
+//
+// A ordem se escolhe arrastando ou pelas setas — os dois caminhos, de propósito. O arrasto no
+// toque exige o toque longo de src/arrastar.js, porque a lista rola; as setas ficam para quem
+// prefere clique preciso e como saída se o arrasto não pegar em algum aparelho.
+function JuntarDocs({ docs, limiteRascunho, juntando, onFechar, onJuntar }) {
+  const [ordem, setOrdem] = useState(() => docs.map((d) => d.id));
+  const listaRef = useRef(null);
+  // arrastar e as setas fazem a mesma coisa: as setas ficam para quem prefere clique preciso,
+  // e como saída se o arrasto não pegar em algum aparelho
+  const arrasto = useArrastarLista({
+    ids: ordem, aoSoltar: setOrdem, containerRef: listaRef, desligado: juntando,
+  });
+  const lista = arrasto.ordem.map((id) => docs.find((d) => d.id === id)).filter(Boolean);
+
+  const mover = (i, delta) => {
+    const j = i + delta;
+    if (j < 0 || j >= ordem.length) return;
+    const nova = [...ordem];
+    [nova[i], nova[j]] = [nova[j], nova[i]];
+    setOrdem(nova);
+  };
+
+  // numPages e herdado só existem depois que o documento foi aberto uma vez (quem preenche é
+  // o efeito de render). Parte nunca aberta mostra "—" e o total vira "≥ N": parsear os PDFs
+  // só para o preview seria segundos de espera por uma linha de texto. O que NÃO se pode
+  // fazer é mostrar zero como se fosse resposta — a glosa dela existe e entra na junção, que
+  // lê os metadados do arquivo na hora.
+  const conhecidas = lista.reduce((s, d) => s + (d.numPages || 0), 0);
+  const incerto = lista.some((d) => !d.numPages || !d.metaLida);
+  const glosa = lista.reduce((s, d) => s + (d.metaLida ? somaHerdada(d.herdado) : 0), 0);
+  const glosaIncerta = lista.some((d) => !d.metaLida);
+  const bytes = lista.reduce((s, d) => s + (d.bytes ? d.bytes.byteLength : 0), 0);
+  const grande = bytes > limiteRascunho;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={juntando ? undefined : onFechar} />
+      <div className="relative bg-[var(--surface)] rounded-xl shadow-2xl p-5 w-full max-w-md border border-[var(--border)]">
+        <div className="flex items-center justify-between mb-3">
+          <b className="text-[var(--text)]">Juntar documentos</b>
+          <button onClick={onFechar} disabled={juntando} title="Fechar (Esc)"
+            className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-40">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <p className="text-xs text-[var(--muted)] mb-2">
+          As partes viram um documento só, nesta ordem. A primeira é o começo do processo.
+        </p>
+
+        <div ref={listaRef} className="max-h-64 overflow-auto maida-scroll -mx-1 px-1">
+          {lista.map((d, i) => (
+            <div key={d.id} {...arrasto.props(d.id)}
+              className={"flex items-center gap-2 p-2 rounded-lg border mb-1.5 " +
+                // uma classe de cursor por vez: com as duas juntas quem ganhava era a ordem
+                // em que o Tailwind as emite, não a ordem escrita aqui
+                (arrasto.arrastandoId === d.id
+                  ? "cursor-grabbing border-[var(--accent)] bg-[var(--panel)] opacity-80 shadow-lg"
+                  : "cursor-grab border-[var(--border)]")}>
+              <GripVertical className="w-4 h-4 shrink-0 text-[var(--muted)]" />
+              <span className="w-5 shrink-0 text-xs font-bold text-[var(--muted)] text-right">{i + 1}.</span>
+              <div className="flex-1 min-w-0">
+                <span className="block text-sm text-[var(--text)] truncate" title={d.name}>{d.name}</span>
+                <span className="block text-[11px] text-[var(--muted)]">
+                  {d.numPages ? `${d.numPages} páginas` : "páginas: —"}
+                  {!d.metaLida ? " · glosa: —"
+                    : somaHerdada(d.herdado) ? ` · glosa R$ ${moeda(somaHerdada(d.herdado))}` : ""}
+                </span>
+              </div>
+              <button onClick={() => mover(i, -1)} disabled={i === 0 || juntando} title="Subir"
+                className="w-7 h-7 shrink-0 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-25">
+                <ChevronUp className="w-4 h-4" />
+              </button>
+              <button onClick={() => mover(i, 1)} disabled={i === lista.length - 1 || juntando} title="Descer"
+                className="w-7 h-7 shrink-0 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)] disabled:opacity-25">
+                <ChevronDown className="w-4 h-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 text-xs text-[var(--muted)] leading-relaxed">
+          <div>Resultado: <b className="text-[var(--text)]">
+            {incerto ? `≥ ${conhecidas}` : conhecidas} páginas</b></div>
+          {(glosa > 0 || glosaIncerta) && (
+            <div>Glosa que vem junto: <b className="text-[var(--text)]">
+              {glosaIncerta ? "≥ " : ""}R$ {moeda(glosa)}</b>
+              {glosaIncerta && " — partes ainda não abertas podem trazer mais"}
+            </div>
+          )}
+          <div className="truncate" title={lista[0] && lista[0].name}>
+            Nome: {lista[0] ? lista[0].name : "—"}
+          </div>
+        </div>
+
+        {grande && (
+          // acima do limite o binário não entra no IndexedDB, e o rascunho é a única coisa
+          // que segura o trabalho num F5 — o auditor precisa saber ANTES de juntar
+          <p className="mt-3 text-[11px] text-amber-600 leading-relaxed">
+            Juntos passam de {Math.round(limiteRascunho / 1048576)} MB: o documento não cabe no
+            rascunho automático, então recarregar a página perderia o trabalho não baixado.
+          </p>
+        )}
+
+        <div className="flex justify-end gap-2 mt-4">
+          <button onClick={onFechar} disabled={juntando}
+            className="px-3 py-2 rounded-lg text-sm border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40">
+            Cancelar
+          </button>
+          <button onClick={() => onJuntar(ordem)} disabled={juntando}
+            className="px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40">
+            {juntando ? "Juntando…" : "Juntar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) {
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
   const papel = PAPEIS[usuario.papel] || {};
@@ -1272,6 +1385,9 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const [saving, setSaving] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [stampsOpen, setStampsOpen] = useState(false);
+  const filaRef = useRef(null); // container que rola da fila — a rolagem automática do arrasto
+  const [juntarOpen, setJuntarOpen] = useState(false); // janela de juntar partes do processo
+  const [selecionados, setSelecionados] = useState(() => new Set()); // ids marcados na fila
   const [ajudaOpen, setAjudaOpen] = useState(false); // tela de atalhos (tecla ?)
   const [senhaOpen, setSenhaOpen] = useState(false); // trocar a própria senha
   const [menuOpen, setMenuOpen] = useState(false);   // engrenagem do cabeçalho
@@ -1442,9 +1558,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   useEffect(() => {
     if (!ready || !activeId) return;
     let cancelled = false;
+    const alvo = getActive(); // fora da promessa: o catch precisa saber de qual documento veio
+    if (!alvo) return;
     (async () => {
-      const doc = getActive();
-      if (!doc) return;
+      const doc = alvo;
       if (!doc.pdfDoc) {
         // isEvalSupported:false → mitiga GHSA-wgrm-67xf-hhpq (exec. de JS em PDF malicioso)
         doc.pdfDoc = await pdfjsLib.getDocument({ data: doc.bytes.slice(0), isEvalSupported: false }).promise;
@@ -1494,7 +1611,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         m.scrollTop = f.y * scale - m.clientHeight / 2;
         focal.current = null;
       }
-    })();
+    })().catch((e) => {
+      // juntar e remover descartam o documento e destroem o pdfDoc dele. Se isso pegar um
+      // render no meio, o getPage/render rejeita — e é a falha de um trabalho que já não
+      // interessa a ninguém. `alvo.solto` é o sinal confiável: o `cancelled` sozinho não
+      // serve, porque ele só vira true quando o React confirma o render seguinte, e a
+      // rejeição do destroy chega antes disso. Erro de verdade, no documento que está na
+      // tela, continua subindo como antes.
+      if (!cancelled && !alvo.solto) throw e;
+    });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, activeId, page, scale, giroRev]);
@@ -2262,7 +2387,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     for (const d of docs)
       for (const lista of Object.values(d.annotations))
         for (const a of lista) {
-          const m = /^[tsyl](\d+)$/.exec(a.id || "");
+          // o "c" do corretivo estava de fora, e o id dele saía repetido depois de
+          // restaurar. Passava batido enquanto cada documento vivia sozinho; juntar dois
+          // põe os dois corretivos na mesma fila, e aí a seleção pega o errado.
+          const m = /^[ctsyl](\d+)$/.exec(a.id || "");
           if (m) maior = Math.max(maior, +m[1]);
         }
     textSeq.current = Math.max(textSeq.current, maior);
@@ -2426,6 +2554,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       const idx = list.findIndex((x) => x.id === id);
       store.current.docs = list.filter((x) => x.id !== id);
       if (d.key) rascunho.apagarDoc(d.key); // sai da fila, sai do rascunho
+      soltarDoc(d);
+      desmarcar([id]);
       if (id === activeId) {
         const rest = store.current.docs;
         const next = rest[idx] || rest[idx - 1] || null;
@@ -2438,6 +2568,134 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     if (temMarcas)
       showConfirm("Remover documento", `Remover "${d.name}"? As marcações não salvas serão perdidas.`, doRemove, { confirmText: "Remover" });
     else doRemove();
+  };
+
+  // ---- reordenar a fila arrastando ----
+  // A fila em memória é a ordem do array; o campo `ordem` é o que reconstrói essa ordem depois
+  // de um F5. Mexer num sem o outro dá uma fila que se desfaz sozinha na próxima abertura.
+  const reordenarFila = (ids) => {
+    const antes = store.current.docs;
+    const nova = ids.map((id) => antes.find((d) => d.id === id)).filter(Boolean);
+    if (nova.length !== antes.length) return; // fila mudou no meio do gesto: não arrisca
+    store.current.docs = nova;
+    nova.forEach((d, i) => {
+      const ordem = i + 1;
+      if (d.ordem === ordem) return;
+      d.ordem = ordem;
+      // documento já exportado teve o rascunho apagado e binarioGravado zerado: regravar aqui
+      // reescreveria megabytes e ressuscitaria um rascunho que já cumpriu o papel
+      if (d.key && !d.saved) salvarRascunho(d, d.page || 1);
+    });
+    ordemSeq.current = Math.max(ordemSeq.current, nova.length);
+    tick();
+  };
+
+  // ---- juntar partes de um processo ----
+  const alternarSelecao = (id) => setSelecionados((s) => {
+    const novo = new Set(s);
+    if (novo.has(id)) novo.delete(id); else novo.add(id);
+    return novo;
+  });
+  const desmarcar = (ids) => setSelecionados((s) => {
+    if (!ids.some((id) => s.has(id))) return s; // nada a fazer: não re-renderiza à toa
+    const novo = new Set(s);
+    for (const id of ids) novo.delete(id);
+    return novo;
+  });
+  // o pdf.js abre um worker por documento; sem isto cada parte descartada deixa um vazando
+  const soltarDoc = (d) => {
+    if (!d) return;
+    // marca ANTES de destruir: o destroy rejeita o getPage/render em voo num microtask, e o
+    // efeito de render precisa saber que a falha é de um documento descartado. Contar com o
+    // `cancelled` do efeito não bastava — ele só vira true quando o React confirma o render
+    // seguinte, e a rejeição pode chegar antes disso.
+    d.solto = true;
+    if (d.pdfDoc) { try { d.pdfDoc.destroy(); } catch { /* já morto */ } d.pdfDoc = null; }
+  };
+
+  const juntarSelecionados = async (ordem) => {
+    const lista = ordem.map((id) => store.current.docs.find((d) => d.id === id)).filter(Boolean);
+    if (lista.length < 2) return;
+    setSaving(true);
+    try {
+      // O herdado de memória manda SÓ quando já foi lido: ele pode ter glosa que o auditor
+      // apagou, e reler o arquivo a ressuscitaria. Documento que nunca foi aberto ainda está
+      // com o `herdado: null` de fábrica (quem preenche é o efeito de render, na primeira vez
+      // que ele aparece na tela) — mandar esse null faria o juntarPdfs acreditar que a parte
+      // não tem glosa nenhuma e descartar em silêncio a auditoria que veio dentro dela.
+      // undefined é o combinado para "não sei, leia do arquivo".
+      const junto = await juntarPdfs(lista.map((d) => ({
+        bytes: d.bytes,
+        herdado: d.metaLida ? d.herdado : undefined,
+        keywordsOriginais: d.metaLida ? (d.keywordsOriginais || "") : undefined,
+      })));
+
+      // tudo que é chaveado por página anda o tamanho das partes anteriores
+      const annotations = {}, rotacoes = {};
+      lista.forEach((d, i) => {
+        Object.assign(annotations, deslocarPaginas(d.annotations, junto.offsets[i]));
+        Object.assign(rotacoes, deslocarPaginas(d.rotacoes, junto.offsets[i]));
+      });
+
+      // o resto do editor trata doc.bytes como ArrayBuffer; o pdf-lib devolve Uint8Array.
+      // A view cobre o buffer inteiro, mas conferir é de graça e evita um PDF truncado caso
+      // isso mude numa versão futura da biblioteca.
+      const u8 = junto.bytes;
+      const bytes = u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength
+        ? u8.buffer : u8.slice().buffer;
+
+      const primeiro = lista[0];
+      const novo = {
+        id: ++seq.current, name: primeiro.name, bytes, pdfDoc: null,
+        numPages: junto.paginas, page: 1, annotations, rotacoes, saved: false,
+        totalConta: lista.map((d) => d.totalConta).find(Boolean) || "",
+        herdado: junto.herdado,
+        keywordsOriginais: junto.keywordsOriginais,
+        key: rascunho.novaChave(),
+        // herda a posição da primeira parte: com uma ordem nova o juntado iria para o fim da
+        // fila depois de uma restauração de rascunho
+        ordem: primeiro.ordem,
+        // true de propósito: os metadados certos são os que acabamos de montar, e deixar o
+        // efeito de render reler as Keywords ressuscitaria glosa que o auditor apagou
+        metaLida: true,
+        semBinario: false,
+        binarioGravado: false,
+      };
+
+      const idsFonte = lista.map((d) => d.id);
+      // o juntado assume a tela. Se quem estava aberto não entrou na junção, ele sai como
+      // sairia por selectDoc: sem isto, a página e as últimas marcações dele se perderiam
+      // junto com o timer do autosave.
+      const anterior = getActive();
+      if (anterior && !idsFonte.includes(anterior.id)) {
+        anterior.page = page;
+        if (!anterior.saved) { clearTimeout(autosave.current.timer); salvarRascunho(anterior, page); }
+      }
+      const antes = store.current.docs;
+      const resto = antes.filter((d) => !idsFonte.includes(d.id));
+      // a posição é contada em `resto`, de onde as partes já saíram: usar o índice em `antes`
+      // erraria por quantas partes ficavam antes da primeira. Com a fila [A,B,C,D] e as partes
+      // A e C, o juntado tem que cair entre B e D, e não no fim.
+      const pos = antes.slice(0, antes.findIndex((d) => d.id === primeiro.id))
+        .filter((d) => !idsFonte.includes(d.id)).length;
+      store.current.docs = [...resto.slice(0, pos), novo, ...resto.slice(pos)];
+      for (const d of lista) { if (d.key) rascunho.apagarDoc(d.key); soltarDoc(d); }
+
+      salvarRascunho(novo, 1);
+      desmarcar(idsFonte);
+      setJuntarOpen(false);
+      redo.current = []; // as entradas apontam para { docId, page } que não existem mais
+      setActiveId(novo.id); setPage(1);
+      tick();
+      // o efeito de render não depende de rev: sem isto a tela continua no PDF antigo
+      setGiroRev((n) => n + 1);
+    } catch (e) {
+      // a janela de juntar fica por cima do diálogo: sem fechá-la, o recado de erro sairia
+      // escondido atrás dela. A seleção continua de pé, para o auditor poder tentar de novo.
+      setJuntarOpen(false);
+      showAlert("Erro ao juntar", e.message);
+    }
+    finally { setSaving(false); }
   };
   const undo = () => {
     const d = getActive(); const l = d && d.annotations[page];
@@ -2664,6 +2922,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const escapar = () => {
     if (menuOpen) { setMenuOpen(false); return; }
     if (senhaOpen) { setSenhaOpen(false); return; }
+    if (juntarOpen) { if (!saving) setJuntarOpen(false); return; } // no meio da junção, não
     if (ajudaOpen) { setAjudaOpen(false); return; }
     if (dialog) { if (!dialog.semBackdrop) setDialog(null); return; }
     if (stampsOpen) { setStampsOpen(false); return; }
@@ -2680,7 +2939,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
     goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
     escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta, bloqueado,
-    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec),
+    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec || juntarOpen),
   };
   useEffect(() => {
     const h = (e) => {
@@ -2776,6 +3035,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const docs = store.current.docs;
   const marked = docs.filter((d) => Object.values(d.annotations).some((l) => l.length)).length;
   const pct = docs.length ? Math.round((marked / docs.length) * 100) : 0;
+  const arrastoFila = useArrastarLista({
+    ids: docs.map((d) => d.id), aoSoltar: reordenarFila,
+    containerRef: filaRef, desligado: saving,
+  });
+  // durante o arrasto a ordem de trabalho é a do hook; fora dele é a da fila
+  const docsNaTela = arrastoFila.ordem.map((id) => docs.find((d) => d.id === id)).filter(Boolean);
+  // na ordem da fila, e não na ordem em que foram marcados: é ela que a janela de juntar
+  // oferece como ordem inicial das partes
+  const selecionadosNaFila = docsNaTela.filter((d) => selecionados.has(d.id));
   const active = getActive();
   const hasMarks = active && (active.annotations[page] || []).length > 0;
   const statusOf = (d) => {
@@ -2942,21 +3210,44 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto p-2 maida-scroll">
-            {docs.map((d) => {
+          <div ref={filaRef} className="flex-1 overflow-auto p-2 maida-scroll">
+            {docsNaTela.map((d) => {
               const [txt, cls] = statusOf(d);
               const autor = ultimoAuditor(d); // veio das Keywords do PDF, se ele já foi auditado
+              const arrastando = arrastoFila.arrastandoId === d.id;
               return (
-                <div key={d.id} onClick={() => selectDoc(d.id)}
-                  className={"animated-card flex flex-col gap-1 p-2.5 rounded-xl cursor-pointer border " +
-                    (d.id === activeId
-                      ? "bg-[var(--panel)] border-[var(--accent)]"
-                      : "border-transparent hover:bg-[var(--hover)]")}>
+                <div key={d.id} {...arrastoFila.props(d.id)}
+                  // soltar o card não pode abrir o documento
+                  onClick={() => { if (!arrastoFila.engoliuClique()) selectDoc(d.id); }}
+                  className={
+                    // sem .animated-card enquanto arrasta: ela tem transition+transform no hover,
+                    // e o card pularia a cada vez que passasse por baixo do ponteiro
+                    (arrastando ? "" : "animated-card ") +
+                    // mãozinha aberta, e fechada enquanto segura — igual à janela de juntar.
+                    // Uma de cada vez: com as duas na string quem ganha é a ordem em que o
+                    // Tailwind as emite, não a ordem em que eu as escrevo.
+                    (arrastando ? "cursor-grabbing " : "cursor-grab ") +
+                    "flex flex-col gap-1 p-2.5 rounded-xl border " +
+                    (arrastando
+                      ? "bg-[var(--panel)] border-[var(--accent)] opacity-80 shadow-lg"
+                      : d.id === activeId
+                        ? "bg-[var(--panel)] border-[var(--accent)]"
+                        : "border-transparent hover:bg-[var(--hover)]")}>
                   <div className="flex items-center justify-between gap-1">
-                    <span className={"text-xs font-bold px-2 py-0.5 rounded-full uppercase " + cls}>{txt}</span>
+                    {/* pista de que o card se arrasta — o gesto vale no card inteiro */}
+                    <GripVertical className="w-3.5 h-3.5 shrink-0 text-[var(--muted)] opacity-60" />
+                    {/* marcar não é abrir: o clique da caixinha não pode subir para o card */}
+                    <input type="checkbox" checked={selecionados.has(d.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => alternarSelecao(d.id)}
+                      title="Selecionar para juntar"
+                      className="w-4 h-4 shrink-0 accent-[var(--accent)] cursor-pointer" />
+                    <span className={"text-xs font-bold px-2 py-0.5 rounded-full uppercase mr-auto " + cls}>{txt}</span>
                     <button onClick={(e) => { e.stopPropagation(); removeDoc(d.id); }}
                       title="Remover da fila"
-                      className="w-7 h-7 flex items-center justify-center rounded-md text-[var(--muted)] hover:text-red-500 hover:bg-[var(--hover)]">
+                      // cursor próprio: o card manda uma mãozinha de arrastar, e a lixeira
+                      // clica, não arrasta (o preflight do Tailwind v4 não põe cursor em button)
+                      className="w-7 h-7 flex items-center justify-center rounded-md cursor-pointer text-[var(--muted)] hover:text-red-500 hover:bg-[var(--hover)]">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -2973,6 +3264,14 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           </div>
 
           <div className="p-3 border-t border-[var(--border)]">
+            {/* só aparece com o que juntar: processo dividido pelo SEI é exceção, não rotina */}
+            {selecionadosNaFila.length >= 2 && (
+              <button onClick={() => setJuntarOpen(true)} disabled={saving}
+                title="Juntar as partes selecionadas num documento só"
+                className="w-full mb-2 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40">
+                <Combine className="w-4 h-4" />Juntar {selecionadosNaFila.length} selecionados
+              </button>
+            )}
             <button onClick={saveAll} disabled={marked === 0 || saving} title="Baixar todos auditados (Ctrl+Shift+S)"
               className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40">
               <Download className="w-4 h-4" />Baixar todos auditados (.zip)
@@ -3258,6 +3557,13 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
 
       {/* trocar a própria senha */}
       {senhaOpen && <TrocarSenha onFechar={() => setSenhaOpen(false)} />}
+
+      {/* juntar partes de um processo dividido */}
+      {juntarOpen && selecionadosNaFila.length >= 2 && (
+        <JuntarDocs docs={selecionadosNaFila} limiteRascunho={rascunho.LIMITE_ARQUIVO}
+          juntando={saving} onFechar={() => { if (!saving) setJuntarOpen(false); }}
+          onJuntar={juntarSelecionados} />
+      )}
 
       {/* painel de carimbos */}
       {stampsOpen && (
