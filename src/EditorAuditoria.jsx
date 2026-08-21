@@ -176,12 +176,67 @@ const PREFIXO_GLOSAS = "maida-glosas:";
 const listaAuditores = (doc, auditor) => {
   const l = doc && doc.herdado && Array.isArray(doc.herdado.auditores) ? [...doc.herdado.auditores] : [];
   if (!auditor) return l;
-  const novo = { nome: auditor.nome, email: auditor.email || "", em: new Date().toISOString() };
+  // o papel viaja junto porque o nome do arquivo mora no disco do auditor e pode ser
+  // renomeado: sem isto, um "AUDITADO (Técnico)" renomeado à mão perderia a etapa técnica
+  const novo = { nome: auditor.nome, email: auditor.email || "", papel: auditor.papel || "",
+    em: new Date().toISOString() };
   // reexportar o mesmo documento não empilha a mesma pessoa: atualiza a data dela
   if (l.length && l[l.length - 1].email === novo.email) l[l.length - 1] = novo;
   else l.push(novo);
   return l;
 };
+// ---- nome do arquivo exportado ----
+// A máscara diz por que etapas o documento passou. O rótulo sai do papel gravado no banco
+// (perfis.papel), então o nome herda a mesma garantia do resto: ninguém se promove a
+// técnico mexendo no JS do navegador.
+export const ROTULO_PAPEL = { tecnico: "Técnico", administrativo: "Administrativo" };
+
+// comparar sem acento e sem caixa: o auditor renomeia arquivo no Windows, e um "(tecnico)"
+// digitado à mão tem que contar como a mesma marca que "(Técnico)"
+const chaveRotulo = (s) =>
+  String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+const CANONICO = new Map(Object.values(ROTULO_PAPEL).map((r) => [chaveRotulo(r), r]));
+
+// " - AUDITADO" seguido dos rótulos, no fim do nome
+const MASCARA = /\s*-\s*AUDITADO((?:\s*\([^()]*\))*)\s*$/i;
+
+// Monta o nome de saída sem nunca repetir a máscara: o auditor salva, para, e só depois
+// continua o processo — reabrindo o próprio arquivo baixado. Antes disso cada volta
+// empilhava mais um " - AUDITADO" no nome.
+// `herdados` são os papéis lidos dos metadados do PDF; `rotulo` é o de quem está salvando.
+export const nomeAuditado = (nome, rotulo, herdados) => {
+  let base = String(nome || "").replace(/\.pdf$/i, "");
+  let rotulos = [];
+  // laço, e não um replace só, por causa dos arquivos que a versão anterior gerou com
+  // " - AUDITADO - AUDITADO" empilhado
+  for (;;) {
+    const m = MASCARA.exec(base);
+    if (!m) break;
+    const grupos = (m[1].match(/\([^()]*\)/g) || []).map((g) => CANONICO.get(chaveRotulo(g.slice(1, -1))));
+    // parêntese que não é papel conhecido (o "(corrigido)" do scripts/reparar-rotacao.mjs,
+    // por exemplo) não é máscara nossa: fica onde está
+    if (grupos.some((g) => !g)) break;
+    rotulos = grupos.concat(rotulos); // a descasca vem da direita, então acumula à esquerda
+    base = base.slice(0, m.index);
+  }
+  const juntar = (r) => {
+    if (r && !rotulos.some((x) => chaveRotulo(x) === chaveRotulo(r))) rotulos.push(r);
+  };
+  (herdados || []).forEach(juntar);
+  juntar(rotulo);
+  // rótulo vazio (papel desconhecido no banco) degrada para o " - AUDITADO" seco de antes,
+  // em vez de escrever "(undefined)" no nome do arquivo do auditor
+  return base + " - AUDITADO" + rotulos.map((r) => ` (${r})`).join("") + ".pdf";
+};
+
+// papéis de quem já auditou, lidos das Keywords do PDF (mesmo acesso defensivo de
+// ultimoAuditor). PDF exportado antes desta versão não traz papel: devolve lista vazia e
+// quem manda passa a ser só o nome do arquivo.
+const rotulosHerdados = (doc) => {
+  const l = doc && doc.herdado && Array.isArray(doc.herdado.auditores) ? doc.herdado.auditores : [];
+  return l.map((a) => (a && ROTULO_PAPEL[a.papel]) || "").filter(Boolean);
+};
+
 // mediana por canal de um bloco RGBA — o miolo do conta-gotas do corretivo.
 // Mediana, e não média: um pixel escuro no meio de fundo claro (a borda de uma letra) puxaria
 // a média para o cinza e o corretivo sairia manchado. Exportada para poder ser testada.
@@ -2539,7 +2594,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     out.setProducer("Editor de Auditoria — Maida");
     return out.save();
   };
-  const outName = (n) => n.replace(/\.pdf$/i, "") + " - AUDITADO.pdf";
+  const outName = (d) => nomeAuditado(d.name, ROTULO_PAPEL[usuario.papel] || "", rotulosHerdados(d));
   const dl = (bytes, name, type = "application/pdf") => {
     const url = URL.createObjectURL(new Blob([bytes], { type }));
     const a = document.createElement("a"); a.href = url; a.download = name; a.click();
@@ -2549,7 +2604,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     const d = getActive(); if (!d) return;
     setSaving(true);
     try {
-      dl(await buildPdf(d), outName(d.name));
+      dl(await buildPdf(d), outName(d));
       d.saved = true;
       // o PDF auditado saiu: o rascunho cumpriu o papel e é descartado
       if (d.key) { rascunho.apagarDoc(d.key); d.binarioGravado = false; }
@@ -2574,7 +2629,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     setSaving(true);
     try {
       const zip = new JSZip();
-      for (const d of alvo) { zip.file(outName(d.name), await buildPdf(d)); d.saved = true; }
+      for (const d of alvo) { zip.file(outName(d), await buildPdf(d)); d.saved = true; }
       const blob = await zip.generateAsync({ type: "blob" });
       dl(blob, "auditados.zip", "application/zip"); tick();
       // só depois do download: se a compactação falhasse, o rascunho ainda seria a
