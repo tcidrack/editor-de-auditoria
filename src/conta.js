@@ -6,12 +6,18 @@
 // dados é o RLS do banco. A service_role key NUNCA pode entrar aqui nem no repositório.
 import { createClient } from "@supabase/supabase-js";
 
+// a tabela de papéis É a lista do que cada auditor pode: quem lê o papel do banco lê daqui
+// o que ligar na tela, e não sai espalhando `usuario.papel === "..."` pelo editor.
 export const PAPEIS = {
-  tecnico: { label: "Auditor técnico", carimbo: true },
-  administrativo: { label: "Auditor administrativo", carimbo: false },
+  tecnico: { label: "Auditor técnico", carimbo: true, glosaColuna: false },
+  administrativo: { label: "Auditor administrativo", carimbo: false, glosaColuna: true },
 };
 export const usaCarimbo = (usuario) =>
   !!(usuario && PAPEIS[usuario.papel] && PAPEIS[usuario.papel].carimbo);
+// a glosa em coluna escreve "G <valor>" em cada linha — marcação do analista administrativo.
+// O técnico glosa riscando a quantidade, e o botão só ocuparia espaço na toolbar dele.
+export const usaGlosaColuna = (usuario) =>
+  !!(usuario && PAPEIS[usuario.papel] && PAPEIS[usuario.papel].glosaColuna);
 
 const URL_SB = import.meta.env.VITE_SUPABASE_URL;
 const ANON_SB = import.meta.env.VITE_SUPABASE_ANON_KEY;

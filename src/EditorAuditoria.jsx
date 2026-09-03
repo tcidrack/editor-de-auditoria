@@ -5,7 +5,7 @@ import {
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
   Keyboard, LogOut, KeyRound, Settings, Square, RotateCcw, RotateCw,
-  ChevronUp, ChevronDown, Combine, GripVertical,
+  ChevronUp, ChevronDown, Combine, GripVertical, Rows3,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -18,7 +18,8 @@ import JSZip from "jszip";
 import * as rascunho from "./rascunho";
 import { PREFIXO_GLOSAS, lerGlosasDoPdf, juntarPdfs, deslocarPaginas, somaHerdada } from "./juntar";
 import { useArrastarLista } from "./arrastar";
-import { PAPEIS, usaCarimbo, lerCarimbo, salvarCarimbo, apagarCarimbo, trocarSenha } from "./conta";
+import { PAPEIS, usaCarimbo, usaGlosaColuna, lerCarimbo, salvarCarimbo, apagarCarimbo,
+  trocarSenha } from "./conta";
 import CampoSenha from "./CampoSenha";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -39,13 +40,19 @@ const CORES = [
   { id: "adm", hex: COR_ADM, label: "Administrativa", title: "Glosa administrativa (azul) — tecla A" },
   { id: "tec", hex: COR_TEC, label: "Técnica", title: "Glosa técnica (vermelha) — tecla T" },
 ];
+// glosa em coluna, em pontos: a janela de leitura é a fatia de tabela AO LADO da coluna (é lá
+// que estão as linhas a contar — onde os "G" nascem o papel está vazio), e a faixa do preview é
+// só a largura que os "G" vão ocupar.
+const LARG_LEITURA_G = 220;
+const LARG_PREVIEW_G = 70;
+
 const classeGlosa = (hex) => {
   const h = String(hex || "").toLowerCase();
   return h === COR_ADM ? "adm" : h === COR_TEC ? "tec" : null;
 };
 
 // ---- ferramentas e atalhos ----
-// a ordem desta lista É a numeração das teclas 1..8 (toolbar e teclado leem daqui)
+// a ordem desta lista É a numeração das teclas (toolbar e teclado leem daqui)
 const FERRAMENTAS = [
   { id: "pen", label: "Desenho", Icon: Pencil },
   { id: "line", label: "Linha", Icon: Minus },
@@ -57,13 +64,24 @@ const FERRAMENTAS = [
   // da própria página. O "Copiar código" fecha a fila por ser leitura, não marcação.
   { id: "cover", label: "Corretivo", Icon: Square },
   { id: "ocr", label: "Copiar código", Icon: ScanText },
+  // glosa em coluna: repete "G <valor>" em todas as linhas de uma faixa de uma vez só.
+  // Entra no fim da fila de propósito — a ordem desta lista é o atalho numérico, e mexer
+  // no meio trocaria as teclas 1..8 que a equipe já tem no dedo.
+  { id: "colglosa", label: "Glosa em coluna", Icon: Rows3, disponivel: usaGlosaColuna },
 ];
-// tela de ajuda (tecla ?) — manter em sincronia com o handler de keydown
-const ATALHOS = [
+// As ferramentas que ESTE auditor vê — e, com isso, a numeração das teclas dele. `disponivel`
+// mora na própria ferramenta para a regra ficar ao lado do que ela liga; sem ele, vale para
+// todo mundo. A glosa em coluna ser a última é o que faz o técnico continuar com as teclas
+// 1..8 exatamente onde sempre estiveram.
+const ferramentasDe = (usuario) =>
+  FERRAMENTAS.filter((f) => !f.disponivel || f.disponivel(usuario));
+// tela de ajuda (tecla ?) — manter em sincronia com o handler de keydown.
+// Recebe as ferramentas do auditor: a lista de teclas tem de bater com a toolbar dele.
+const montarAtalhos = (ferramentas) => [
   {
     grupo: "Ferramentas",
     itens: [
-      ...FERRAMENTAS.map((f, i) => ({ teclas: [String(i + 1)], descricao: f.label })),
+      ...ferramentas.map((f, i) => ({ teclas: [String(i + 1)], descricao: f.label })),
       { teclas: ["0"], descricao: "Modo navegar (nenhuma ferramenta)" },
       { teclas: ["C"], descricao: "Painel de carimbos" },
       { teclas: ["Esc"], descricao: "Fecha balões, desmarca o item, volta a navegar" },
@@ -1073,7 +1091,7 @@ function CalculadoraGlosas({ g, aberto, alterna, totalConta, onTotalConta, onIns
 }
 
 // ---- tela de atalhos (tecla ?) ----
-function AjudaAtalhos({ onFechar }) {
+function AjudaAtalhos({ secoes, onFechar }) {
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50" onClick={onFechar} />
@@ -1093,7 +1111,7 @@ function AjudaAtalhos({ onFechar }) {
           Os atalhos não disparam enquanto você digita num campo de texto.
         </p>
         <div className="grid sm:grid-cols-2 gap-x-6 gap-y-4">
-          {ATALHOS.map((sec) => (
+          {secoes.map((sec) => (
             <div key={sec.grupo}>
               <div className="text-xs uppercase tracking-wide text-[var(--muted)] mb-1.5">{sec.grupo}</div>
               <div className="flex flex-col">
@@ -1362,6 +1380,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const ready = true; // libs empacotadas no bundle — sempre disponíveis
   const papel = PAPEIS[usuario.papel] || {};
   const carimbaDoc = usaCarimbo(usuario); // técnico assina; administrativo não
+  // a toolbar, as teclas numéricas e a tela de atalhos leem todas daqui
+  const ferramentas = useMemo(() => ferramentasDe(usuario), [usuario]);
   const [loadErr] = useState("");
 
   const [tema, setTema] = useState(() => localStorage.getItem("tema") || "claro");
@@ -1413,7 +1433,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const [ocr, setOcr] = useState(null); // leitura de código: { x, y, w, h, loading, text, err }
   const [ocrHold, setOcrHold] = useState(false); // mouse/foco no balão: pausa o fechamento
   const [glosaTec, setGlosaTec] = useState(null); // balão de confirmação da glosa técnica
+  const [colGlosa, setColGlosa] = useState(null); // balão da glosa em coluna
   const textSeq = useRef(0);
+  const ultimoValorCol = useRef("");  // o valor da última coluna, para não redigitar na seguinte
+  const grupoSeq = useRef(0);         // identifica as caixas nascidas do mesmo arrasto
   const editOrig = useRef("");
   const [rev, tick] = useReducer((x) => x + 1, 0); // rev também serve de dep p/ os memos
 
@@ -1429,6 +1452,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   // limpa edição/seleção ao trocar de documento ou página
   useEffect(() => {
     setEditingId(null); setSelectedId(null); setOcr(null); setOcrHold(false); setGlosaTec(null);
+    setColGlosa(null);
   }, [activeId, page]);
 
   // mantém o campo do rodapé em sincronia quando a página muda por fora (setas, troca de doc)
@@ -1500,7 +1524,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     [activeId, rev]);
 
   // ferramentas de desenho/marcação: enquanto ativas, as caixas DOM ficam não-interativas
-  const isDrawTool = ["pen", "line", "highlight", "check", "eraser", "ocr", "cover"].includes(tool);
+  const isDrawTool = ["pen", "line", "highlight", "check", "eraser", "ocr", "cover", "colglosa"].includes(tool);
 
   // Tetos das alças de redimensionar, ancorados no papel e não no zoom: ~22pt de fonte
   // (em A4, proporcional em papel maior) e 60% da largura da página para o carimbo.
@@ -1665,6 +1689,16 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       const x = Math.min(a.x1, a.x2) * s, y = Math.min(a.y1, a.y2) * s;
       const w = Math.abs(a.x2 - a.x1) * s, h = Math.abs(a.y2 - a.y1) * s;
       ctx.fillStyle = a.color || "#ffffff"; ctx.fillRect(x, y, w, h);
+    } else if (a.type === "colsel") {
+      // preview da glosa em coluna: a guia marca onde os "G" vão nascer e a faixa mostra
+      // até onde a coluna desce. Nunca vira anotação — quem escreve é aplicarColunaGlosa.
+      const y0 = Math.min(a.y1, a.y2) * s, y1 = Math.max(a.y1, a.y2) * s;
+      const x = a.x1 * s;
+      ctx.save();
+      ctx.fillStyle = hexA(COR_ADM, 0.12); ctx.fillRect(x, y0, LARG_PREVIEW_G * s, y1 - y0);
+      ctx.strokeStyle = COR_ADM; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+      ctx.restore();
     } else if (a.type === "ocrsel") {
       // seleção da ferramenta "Copiar código": só preview, nunca vira anotação
       const x = Math.min(a.x1, a.x2) * s, y = Math.min(a.y1, a.y2) * s;
@@ -1807,7 +1841,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       drawing.current = true; startPt.current = p;
       return;
     }
-    if (tool !== "highlight" && tool !== "ocr") {
+    if (tool !== "highlight" && tool !== "ocr" && tool !== "colglosa") {
       // modo neutro: arrastar para navegar pelo documento (mouse ou dedo)
       const m = mainRef.current; if (!m) return;
       panning.current = { x: e.clientX, y: e.clientY, sl: m.scrollLeft, st: m.scrollTop };
@@ -1854,7 +1888,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     }
     const s = startPt.current;
     drawOverlay(
-      tool === "ocr" ? { type: "ocrsel", x1: s.x, y1: s.y, x2: p.x, y2: p.y }
+      tool === "colglosa" ? { type: "colsel", x1: s.x, y1: s.y, x2: p.x, y2: p.y }
+      : tool === "ocr" ? { type: "ocrsel", x1: s.x, y1: s.y, x2: p.x, y2: p.y }
       : tool === "cover" ? { type: "cover", x1: s.x, y1: s.y, x2: p.x, y2: p.y, color: corCover.current }
       : { type: "highlight", x1: s.x, y1: s.y, x2: p.x, y2: p.y, color });
   };
@@ -1896,6 +1931,13 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       const w = Math.abs(p.x - s.x), h = Math.abs(p.y - s.y);
       drawOverlay();
       if (w >= 6 && h >= 6) readRegion({ x, y, w, h }); // ignora clique/arraste mínimo
+      return;
+    }
+    if (tool === "colglosa") {
+      // o x é o do INÍCIO do arrasto, não o menor: é a coluna onde o auditor quer os "G"
+      const y0 = Math.min(s.y, p.y), y1 = Math.max(s.y, p.y);
+      drawOverlay();
+      if (y1 - y0 >= 12) abrirColunaGlosa(s.x, y0, y1 - y0); // clique solto não abre nada
       return;
     }
     if (tool === "cover") {
@@ -1968,17 +2010,32 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     return out;
   };
 
-  // lê uma área da página e devolve { texto, palavras } — as palavras trazem o x em pontos
-  // do documento, que é o que permite saber qual coluna da tabela cada número ocupa.
-  const lerRegiaoTexto = async (r) => {
+  // mesma árvore, parando nas LINHAS: é delas que a glosa em coluna tira o y de cada item
+  const ocrLinhas = (d) => {
+    const out = [];
+    for (const b of d.blocks || [])
+      for (const p of b.paragraphs || [])
+        for (const l of p.lines || []) out.push(l);
+    return out;
+  };
+
+  // lê uma área da página e devolve { texto, palavras, linhas } — palavras e linhas trazem as
+  // coordenadas em pontos do documento, que é o que permite saber qual coluna da tabela cada
+  // número ocupa (glosa técnica) e onde fica cada item da lista (glosa em coluna).
+  const lerRegiaoTexto = async (r, { escala = 6 } = {}) => {
     const doc = getActive(); if (!doc || !doc.pdfDoc) return null;
     const pageObj = await doc.pdfDoc.getPage(page);
     // Recorte em alta resolução: renderiza a página inteira deslocada, num canvas do
     // tamanho da área (as coords do app já são pontos do PDF — ver toDoc).
     // A margem extra é essencial: o tesseract erra muito quando o texto encosta na borda
     // do recorte (medido neste PDF: 12/20 sem margem → 18/20 com margem + filtro abaixo).
-    const S = 6;   // resolução do recorte (S=6 saiu bem melhor que S=4 nos testes)
     const MG = 8;  // margem em pontos ao redor da seleção
+    // resolução do recorte (S=6 saiu bem melhor que S=4 nos testes de código isolado).
+    // A faixa da glosa em coluna é alta — a página inteira, às vezes — e a 6× viraria um canvas
+    // de milhões de pixels que o tesseract levaria dezenas de segundos para varrer. Por isso a
+    // escala é do chamador, e ainda assim fica limitada por um teto de área.
+    const S = Math.max(1, Math.min(escala,
+      Math.sqrt(16e6 / Math.max(1, (r.w + MG * 2) * (r.h + MG * 2)))));
     // mesma rotação do render principal: as coords da seleção estão no espaço da tela,
     // e sem isso o recorte lido pelo tesseract sairia de outro lugar da página
     const vp = pageObj.getViewport({ scale: S, rotation: pageObj.rotate + giroDaPagina(doc, page) });
@@ -2004,9 +2061,21 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       text: p.text,
       x0: r.x - MG + p.bbox.x0 / S,   // de volta para pontos do documento
       x1: r.x - MG + p.bbox.x1 / S,
+      y0: r.y - MG + p.bbox.y0 / S,
+      y1: r.y - MG + p.bbox.y1 / S,
     }));
+    const linhas = ocrLinhas(data)
+      .filter((l) => {
+        const cy = (l.bbox.y0 + l.bbox.y1) / 2, cx = (l.bbox.x0 + l.bbox.x1) / 2;
+        return cx >= X0 && cx <= X1 && cy >= Y0 && cy <= Y1;
+      })
+      .map((l) => ({
+        texto: String(l.text || "").trim(),
+        y0: r.y - MG + l.bbox.y0 / S,
+        y1: r.y - MG + l.bbox.y1 / S,
+      }));
     const bruto = dentro.length ? dentro.map((p) => p.text).join(" ") : data.text || "";
-    return { texto: bruto.replace(/\s+/g, " ").trim(), palavras };
+    return { texto: bruto.replace(/\s+/g, " ").trim(), palavras, linhas };
   };
 
   const readRegion = async (r) => {
@@ -2067,6 +2136,100 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     setGlosaTec(null); tick();
   };
 
+  // ---- glosa em coluna: um "G <valor>" ao lado de cada linha da faixa arrastada ----
+  // O caso que motivou isto: uma conta com 30 linhas iguais do mesmo exame, todas com a mesma
+  // glosa. Uma a uma, é caixa de texto + digitação + posicionamento 30 vezes.
+  //
+  // As linhas vêm do OCR da tabela AO LADO da coluna (o lugar onde os "G" nascem está vazio,
+  // não há o que ler ali). Se a contagem sair errada, o auditor corrige no balão e o app
+  // distribui as caixas por igual dentro da faixa que ele arrastou — o arrasto é a verdade
+  // sobre onde a coluna começa e termina; o OCR só afina o alinhamento linha a linha.
+  const mediana = (l) => {
+    if (!l.length) return 0;
+    const o = [...l].sort((a, b) => a - b), m = o.length >> 1;
+    return o.length % 2 ? o[m] : (o[m - 1] + o[m]) / 2;
+  };
+  // valor sugerido: o da última coluna feita nesta sessão; na primeira, a última glosa
+  // administrativa do documento — que é justamente a que o auditor viria copiando à mão.
+  const valorSugerido = () => {
+    if (ultimoValorCol.current) return ultimoValorCol.current;
+    const ultima = glosas.adm[glosas.adm.length - 1];
+    return ultima ? moeda(ultima.valor) : "";
+  };
+  const abrirColunaGlosa = async (x, y, h) => {
+    const doc = getActive(); if (!doc || !doc.pdfDoc) return;
+    // a tabela fica à esquerda da coluna de glosas; só quando ela nasce colada na margem
+    // é que o texto a ser contado está do outro lado
+    const faixa = x < 60
+      ? { x, y: y - 2, w: LARG_LEITURA_G, h: h + 4 }
+      : { x: Math.max(0, x - LARG_LEITURA_G), y: y - 2, w: Math.min(LARG_LEITURA_G, x), h: h + 4 };
+    const primeira = !ocrWorker.current;
+    const base = { x, y, h, valor: valorSugerido(), linhas: [], qtd: "", err: "" };
+    setColGlosa({ ...base, loading: true, primeira });
+    const semLeitura = (err) =>
+      setColGlosa((g) => (g && g.loading ? { ...g, loading: false, err } : g));
+    try {
+      // escala baixa de propósito: aqui interessa ONDE estão as linhas, não ler os glifos
+      const lido = await lerRegiaoTexto(faixa, { escala: 3 });
+      let linhas = ((lido && lido.linhas) || [])
+        .filter((l) => /[0-9A-Za-zÀ-ÿ]/.test(l.texto))
+        .sort((a, b) => a.y0 - b.y0);
+      // altura fora de escala é ruído do OCR (duas linhas grudadas, borda do recorte)
+      const med = mediana(linhas.map((l) => l.y1 - l.y0));
+      if (med > 0) linhas = linhas.filter((l) => {
+        const alt = l.y1 - l.y0;
+        return alt >= med * 0.4 && alt <= med * 2.5;
+      });
+      if (linhas.length < 2) {
+        semLeitura("Não consegui contar as linhas — informe quantas são.");
+        return;
+      }
+      setColGlosa((g) => (g && g.loading
+        ? { ...g, loading: false, linhas, qtd: String(linhas.length) } : g));
+    } catch {
+      semLeitura("Falha ao ler a área — informe quantas linhas são.");
+    }
+  };
+  const aplicarColunaGlosa = () => {
+    const g = colGlosa; if (!g) return;
+    const v = numeroBR(g.valor);
+    const n = Math.floor(numeroBR(g.qtd));
+    if (!(v > 0) || !(n >= 1)) return;
+    const doc = getActive(); if (!doc) return;
+    // Onde cada caixa nasce, em ordem de preferência:
+    //  • a contagem bate com a leitura → centro de cada linha lida (alinhamento perfeito);
+    //  • o auditor pediu MENOS que o lido → as n primeiras linhas. O caso comum é o arrasto
+    //    ter passado um pouco do último item e pego uma linha a mais lá embaixo;
+    //  • pediu MAIS → o OCR perdeu linhas: aí a verdade é o arrasto, dividido em n faixas iguais.
+    const lidos = g.linhas.map((l) => (l.y0 + l.y1) / 2);
+    const centros = n <= lidos.length && lidos.length
+      ? lidos.slice(0, n)
+      : Array.from({ length: n }, (_, i) => g.y + (i + 0.5) * (g.h / n));
+    // a fonte sai do espaçamento das linhas: numa tabela apertada, o corpo padrão do texto
+    // avulso (15pt) sairia por cima da linha de baixo. Com uma linha só não há espaçamento
+    // para medir, e aí vale o mesmo tamanho de qualquer texto inserido à mão.
+    const passo = n > 1 ? (centros[n - 1] - centros[0]) / (n - 1) : 0;
+    const size = passo > 0
+      ? Math.max(6, Math.min(tetoFonte, Math.round(passo * 0.8)))
+      : Math.max(9, Math.min(22, Math.round(15 / scale)));
+    const text = `G ${moeda(v)}`;      // formato que o RE_GLOSA reconhece e a calculadora soma
+    const grupo = "gc" + ++grupoSeq.current; // marca o lote: o desfazer leva a coluna inteira
+    const lista = (doc.annotations[page] = doc.annotations[page] || []);
+    let primeiro = null;
+    for (const c of centros) {
+      const id = "t" + ++textSeq.current;
+      if (!primeiro) primeiro = id;
+      lista.push({
+        type: "text", id, grupo,
+        x: Math.max(0, g.x), y: Math.max(0, c - size * 0.7), // ~centro visual da linha
+        text, size, color: COR_ADM, w: 120, h: 24,           // sempre azul: é administrativa
+      });
+    }
+    ultimoValorCol.current = g.valor;
+    doc.saved = false; redo.current = [];
+    setColGlosa(null); setTool("select"); setSelectedId(primeiro); tick();
+  };
+
   // ---- linha-guia horizontal (1 clique atravessa a largura da página) ----
   const addLine = (p) => {
     const doc = getActive(); if (!doc) return;
@@ -2111,8 +2274,11 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     doc.saved = false; editOrig.current = ""; redo.current = [];
     setSelectedId(id); setEditingId(id); tick();
   };
-  // seleciona ferramenta; clicar de novo na ativa desmarca (modo neutro = navegar)
+  // seleciona ferramenta; clicar de novo na ativa desmarca (modo neutro = navegar).
+  // O filtro por papel passa por aqui e só por aqui — botão, tecla e código novo entram
+  // todos por esta porta, então não há como ligar uma ferramenta que o auditor não vê.
   const selectTool = (id) => {
+    if (!ferramentas.some((f) => f.id === id)) return;
     setTool(tool === id ? "select" : id);
     setSelectedId(null);
     setOcr(null); setOcrHold(false);
@@ -2697,11 +2863,17 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     }
     finally { setSaving(false); }
   };
+  // Uma coluna de glosas é um ato só: sem isto, desfazer 30 linhas seria 30 Ctrl+Z. As caixas
+  // do mesmo arrasto compartilham `grupo` e saem juntas (a borracha continua indo de uma em
+  // uma — é o que serve para corrigir uma linha isolada).
   const undo = () => {
     const d = getActive(); const l = d && d.annotations[page];
     if (l && l.length) {
-      const ann = l.pop();
-      redo.current.push({ docId: activeId, page, ann });
+      const ultima = l[l.length - 1];
+      const anns = [l.pop()];
+      if (ultima.grupo)
+        while (l.length && l[l.length - 1].grupo === ultima.grupo) anns.unshift(l.pop());
+      redo.current.push({ docId: activeId, page, anns });
       d.saved = false;
       setSelectedId(null); drawOverlay(); tick();
     }
@@ -2709,7 +2881,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const redoAction = () => {
     const item = redo.current.pop(); if (!item) return;
     const d = store.current.docs.find((x) => x.id === item.docId); if (!d) return;
-    (d.annotations[item.page] = d.annotations[item.page] || []).push(item.ann);
+    (d.annotations[item.page] = d.annotations[item.page] || []).push(...item.anns);
     d.saved = false;
     drawOverlay(); tick();
   };
@@ -2927,19 +3099,21 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     if (dialog) { if (!dialog.semBackdrop) setDialog(null); return; }
     if (stampsOpen) { setStampsOpen(false); return; }
     if (glosaTec) { setGlosaTec(null); return; }
+    if (colGlosa) { setColGlosa(null); return; }
     if (ocr) { setOcr(null); setOcrHold(false); return; }
     if (selectedId) { setSelectedId(null); return; }
     if (tool !== "select") setTool("select");
   };
 
-  // atalhos de teclado (lê versão atual via ref) — a lista para o usuário está em ATALHOS
+  // atalhos de teclado (lê versão atual via ref) — a lista para o usuário sai de montarAtalhos
   const kb = useRef({});
   kb.current = {
+    ferramentas,
     undo, redoAction, prevPage, nextPage, nudgeSelected, deleteText, editingId, selectedId,
     selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
     goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
     escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta, bloqueado,
-    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec || juntarOpen),
+    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec || colGlosa || juntarOpen),
   };
   useEffect(() => {
     const h = (e) => {
@@ -3000,9 +3174,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       if (k === "]") { e.preventDefault(); kb.current.stepDoc(1); return; }
       if (k === "[") { e.preventDefault(); kb.current.stepDoc(-1); return; }
 
-      // ferramentas: 1..7 na ordem da toolbar; 0 volta ao modo navegar
-      if (k >= "1" && k <= String(FERRAMENTAS.length)) {
-        e.preventDefault(); kb.current.selectTool(FERRAMENTAS[Number(k) - 1].id); return;
+      // ferramentas: 1..N na ordem da toolbar DESTE auditor; 0 volta ao modo navegar
+      const fs = kb.current.ferramentas;
+      if (k >= "1" && k <= String(fs.length)) {
+        e.preventDefault(); kb.current.selectTool(fs[Number(k) - 1].id); return;
       }
       if (k === "0") { e.preventDefault(); kb.current.setTool("select"); kb.current.setSelectedId(null); return; }
 
@@ -3088,10 +3263,11 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       {/* toolbar (compacta no celular: só ícones, quebra linha se precisar)
           flex-wrap em CADA grupo, não só no header: um grupo com shrink-0 e conteúdo que não
           quebra tem largura intrínseca fixa, e as 8 ferramentas + o carimbo somavam 415px —
-          mais do que qualquer celular tem. O carimbo, último da fila, saía da tela. */}
+          mais do que qualquer celular tem. O carimbo, último da fila, saía da tela.
+          (o administrativo tem uma ferramenta a mais, a glosa em coluna — mais motivo ainda) */}
       <header className="flex flex-wrap items-center gap-1.5 sm:gap-2 md:gap-3 px-2 md:px-4 py-2 bg-[var(--surface)] border-y border-[var(--border)] shadow-sm z-10">
         <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
-          {FERRAMENTAS.map(({ id, label, Icon }, i) => (
+          {ferramentas.map(({ id, label, Icon }, i) => (
             <button key={id} onClick={() => selectTool(id)} title={`${label} (${i + 1})`}
               className={"flex items-center gap-1.5 px-2 sm:px-2.5 md:px-3 py-2 rounded-lg text-sm border font-semibold transition-colors whitespace-nowrap " +
                 (tool === id
@@ -3437,6 +3613,78 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                     </div>
                   </div>
                 )}
+                {/* glosa em coluna: valor uma vez só, repetido em todas as linhas da faixa */}
+                {colGlosa && (
+                  <div
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") { e.stopPropagation(); setColGlosa(null); }
+                      if (e.key === "Enter") { e.stopPropagation(); aplicarColunaGlosa(); }
+                    }}
+                    style={{
+                      position: "absolute", zIndex: 6, pointerEvents: "auto",
+                      left: colGlosa.x * scale, top: (colGlosa.y + colGlosa.h) * scale + 8,
+                      lineHeight: 1.3,
+                    }}>
+                    <div className="p-2.5 rounded-lg shadow-lg text-sm min-w-[15rem]
+                      bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]"
+                      style={{ borderLeft: `4px solid ${COR_ADM}` }}>
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <b className="text-xs uppercase tracking-wide text-[var(--muted)]">Glosa em coluna</b>
+                        <button onClick={() => setColGlosa(null)} title="Fechar"
+                          className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+                      </div>
+                      {colGlosa.loading ? (
+                        <div className="px-1 py-1 text-[var(--muted)]">
+                          {colGlosa.primeira ? "Preparando leitor…" : "Contando as linhas…"}
+                        </div>
+                      ) : (
+                        <>
+                          {colGlosa.err && (
+                            <div className="mb-2 text-xs text-[var(--muted)]">{colGlosa.err}</div>
+                          )}
+                          <div className="flex items-center gap-1.5">
+                            <label className="flex flex-col gap-0.5">
+                              <span className="text-[10px] uppercase text-[var(--muted)]">Valor</span>
+                              <input value={colGlosa.valor} autoFocus
+                                onFocus={(e) => e.target.select()}
+                                onChange={(e) => setColGlosa((g) => ({ ...g, valor: e.target.value }))}
+                                className="w-24 px-1.5 py-1 rounded-md text-right font-mono
+                                  border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                                  focus:outline-none focus:border-[var(--accent)]" />
+                            </label>
+                            <span className="text-[var(--muted)] self-end pb-1.5">em</span>
+                            <label className="flex flex-col gap-0.5">
+                              <span className="text-[10px] uppercase text-[var(--muted)]">Linhas</span>
+                              <input value={colGlosa.qtd} inputMode="numeric"
+                                onFocus={(e) => e.target.select()}
+                                onChange={(e) => setColGlosa((g) => ({ ...g, qtd: e.target.value }))}
+                                title="Quantas linhas recebem a glosa. Corrija se a contagem saiu errada."
+                                className="w-14 px-1.5 py-1 rounded-md text-right font-mono
+                                  border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                                  focus:outline-none focus:border-[var(--accent)]" />
+                            </label>
+                          </div>
+                          <div className="mt-2 text-right font-semibold" style={{ color: COR_ADM }}>
+                            = R$ {moeda((Math.floor(numeroBR(colGlosa.qtd)) || 0) * (numeroBR(colGlosa.valor) || 0))}
+                          </div>
+                          <div className="flex items-center gap-1.5 mt-2">
+                            <button onClick={aplicarColunaGlosa}
+                              disabled={!(numeroBR(colGlosa.valor) > 0 && Math.floor(numeroBR(colGlosa.qtd)) >= 1)}
+                              className="flex-1 px-2 py-1.5 rounded-md text-xs font-semibold
+                                bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40">
+                              Glosar coluna
+                            </button>
+                            <button onClick={() => setColGlosa(null)}
+                              className="px-2 py-1.5 rounded-md text-xs font-semibold
+                                border border-[var(--border)] text-[var(--muted)] hover:bg-[var(--hover)]">
+                              Cancelar
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {/* confirmação da glosa técnica (qtd cortada × valor unitário) */}
                 {glosaTec && (
                   <div
@@ -3553,7 +3801,9 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       )}
 
       {/* tela de atalhos do teclado */}
-      {ajudaOpen && <AjudaAtalhos onFechar={() => setAjudaOpen(false)} />}
+      {ajudaOpen && (
+        <AjudaAtalhos secoes={montarAtalhos(ferramentas)} onFechar={() => setAjudaOpen(false)} />
+      )}
 
       {/* trocar a própria senha */}
       {senhaOpen && <TrocarSenha onFechar={() => setSenhaOpen(false)} />}
