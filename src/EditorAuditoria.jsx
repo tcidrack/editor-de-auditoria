@@ -138,6 +138,21 @@ const valorGlosa = (txt) => {
 // valor monetário isolado, do jeito que o OCR devolve ("298,81", "1.019,57")
 const RE_MOEDA = /^\d{1,3}(?:\.\d{3})*,\d{2}$/;
 
+// O código do procedimento vem impresso com os separadores da tabela ("4.03.08.39-1"), mas quem
+// recebe o valor colado espera a sequência crua. Tirar aqui poupa a limpeza à mão em toda leitura.
+const soDigitos = (txt) => String(txt || "").replace(/\D+/g, "");
+
+// Só dígitos e os separadores que sobram no recorte: os pontos e o traço do próprio código, o
+// espaço, e os "|" da moldura da tabela, que o OCR quase sempre traz junto. A vírgula fica de
+// fora de propósito — assim um valor lido ("59,68") nunca é confundido com código.
+const SO_CODIGO = /^[\d.\-\s|]*\d[\d.\-\s|]*$/;
+// A ferramenta tem dois usos: copiar o código do procedimento e copiar a descrição do item, que
+// a equipe cola na pesquisa. Limpar só o primeiro — e ele se reconhece por não ter palavra nenhuma.
+const limparLeitura = (txt) => {
+  const t = String(txt || "").trim();
+  return SO_CODIGO.test(t) ? soDigitos(t) : t;
+};
+
 // "1.019,57" → 1019.57 (aceita também "1019.57" digitado com ponto)
 const numeroBR = (txt) => {
   const s = String(txt ?? "").trim().replace(/[^\d.,-]/g, "");
@@ -1401,6 +1416,14 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   // (o administrativo precisa enxergar, e às vezes ajustar, a glosa técnica herdada do PDF)
   const [color, setColor] = useState(carimbaDoc ? COR_TEC : COR_ADM);
   const [thickness, setThickness] = useState(2);
+  // corpo do texto inserido, em pontos do papel. Guardado como o tema: o auditor acerta uma vez
+  // e vale para as contas seguintes. (Antes o corpo saía de 15/zoom — trabalhando afastado, a
+  // marcação nascia enorme.)
+  const [fonte, setFonte] = useState(() =>
+    Math.max(6, Math.min(22, Number(localStorage.getItem("fonteTexto")) || 10)));
+  // o efeito mora aqui, e não junto do tema: o array de dependências é avaliado durante o
+  // render, então lá em cima ele lia `fonte` antes da declaração e derrubava o editor inteiro
+  useEffect(() => { localStorage.setItem("fonteTexto", String(fonte)); }, [fonte]);
   const [checkSymbol, setCheckSymbol] = useState("check"); // símbolo ativo: "check" | "cross"
   const [saving, setSaving] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -2084,13 +2107,14 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     setOcr({ ...r, loading: true, primeira, text: "", err: "" });
     try {
       const lido = await lerRegiaoTexto(r);
-      const texto = lido ? lido.texto : "";
-      if (!texto) {
+      // código sai limpo; descrição sai como foi lida (ver limparLeitura)
+      const saida = limparLeitura(lido && lido.texto);
+      if (!saida) {
         setOcr((o) => (o ? { ...o, loading: false, err: "Não consegui ler essa área — tente selecionar mais perto do código." } : o));
         return;
       }
-      const ok = await copiar(texto);
-      setOcr((o) => (o ? { ...o, loading: false, text: texto, copiado: ok } : o));
+      const ok = await copiar(saida);
+      setOcr((o) => (o ? { ...o, loading: false, text: saida, copiado: ok } : o));
     } catch {
       setOcr((o) => (o ? { ...o, loading: false, err: "Falha ao ler a área. Tente de novo." } : o));
     }
@@ -2164,7 +2188,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       ? { x, y: y - 2, w: LARG_LEITURA_G, h: h + 4 }
       : { x: Math.max(0, x - LARG_LEITURA_G), y: y - 2, w: Math.min(LARG_LEITURA_G, x), h: h + 4 };
     const primeira = !ocrWorker.current;
-    const base = { x, y, h, valor: valorSugerido(), linhas: [], qtd: "", err: "" };
+    const base = { x, y, h, valor: valorSugerido(), linhas: [], qtd: "",
+      tamanho: String(tamanhoAtual), err: "" };
     setColGlosa({ ...base, loading: true, primeira });
     const semLeitura = (err) =>
       setColGlosa((g) => (g && g.loading ? { ...g, loading: false, err } : g));
@@ -2184,8 +2209,14 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         semLeitura("Não consegui contar as linhas — informe quantas são.");
         return;
       }
+      // corpo sugerido pelo espaçamento das linhas lidas. O teto aqui é 14, e não o tetoFonte
+      // (~22) das alças: acima disso um "G 10,56" não cabe na linha de uma tabela — foi assim
+      // que colunas saíram com a fonte gigante.
+      const centros = linhas.map((l) => (l.y0 + l.y1) / 2);
+      const passo = mediana(centros.slice(1).map((c, i) => c - centros[i]));
+      const tam = passo > 0 ? Math.max(6, Math.min(14, Math.round(passo * 0.8))) : tamanhoAtual;
       setColGlosa((g) => (g && g.loading
-        ? { ...g, loading: false, linhas, qtd: String(linhas.length) } : g));
+        ? { ...g, loading: false, linhas, qtd: String(linhas.length), tamanho: String(tam) } : g));
     } catch {
       semLeitura("Falha ao ler a área — informe quantas linhas são.");
     }
@@ -2205,13 +2236,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     const centros = n <= lidos.length && lidos.length
       ? lidos.slice(0, n)
       : Array.from({ length: n }, (_, i) => g.y + (i + 0.5) * (g.h / n));
-    // a fonte sai do espaçamento das linhas: numa tabela apertada, o corpo padrão do texto
-    // avulso (15pt) sairia por cima da linha de baixo. Com uma linha só não há espaçamento
-    // para medir, e aí vale o mesmo tamanho de qualquer texto inserido à mão.
-    const passo = n > 1 ? (centros[n - 1] - centros[0]) / (n - 1) : 0;
-    const size = passo > 0
-      ? Math.max(6, Math.min(tetoFonte, Math.round(passo * 0.8)))
-      : Math.max(9, Math.min(22, Math.round(15 / scale)));
+    // o corpo é o do campo Tamanho do balão (que já nasce sugerido pelo espaçamento das linhas)
+    const size = Math.max(6, Math.min(tetoFonte, Math.floor(numeroBR(g.tamanho)) || tamanhoAtual));
     const text = `G ${moeda(v)}`;      // formato que o RE_GLOSA reconhece e a calculadora soma
     const grupo = "gc" + ++grupoSeq.current; // marca o lote: o desfazer leva a coluna inteira
     const lista = (doc.annotations[page] = doc.annotations[page] || []);
@@ -2226,6 +2252,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       });
     }
     ultimoValorCol.current = g.valor;
+    setFonte(size); // o corpo escolhido aqui vale para a próxima coluna e para o texto avulso
     doc.saved = false; redo.current = [];
     setColGlosa(null); setTool("select"); setSelectedId(primeiro); tick();
   };
@@ -2266,8 +2293,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const addText = (p) => {
     const doc = getActive(); if (!doc) return;
     const id = "t" + ++textSeq.current;
-    // tamanho proporcional ao zoom → ~15px na tela (no mobile não nasce gigante)
-    const size = Math.max(9, Math.min(22, Math.round(15 / scale)));
+    const size = tamanhoAtual; // corpo escolhido na toolbar (Tamanho)
     (doc.annotations[page] = doc.annotations[page] || []).push({
       type: "text", id, x: p.x, y: p.y, text: "", size, color, w: 120, h: 24,
     });
@@ -2291,9 +2317,30 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     const a = findText(id); if (!a) return;
     a.x = x; a.y = y; getActive().saved = false; tick();
   };
+  // Redimensionar uma caixa nascida de uma coluna redimensiona a coluna toda: corpos diferentes
+  // numa mesma coluna são defeito, não intenção. Vale para a alça do TextBox e para o controle
+  // de Tamanho da toolbar — os dois entram por aqui.
   const resizeText = (id, size) => {
-    const a = findText(id); if (!a) return;
-    a.size = size; getActive().saved = false; tick();
+    const doc = getActive(); const a = findText(id); if (!doc || !a) return;
+    const alvos = a.grupo ? (doc.annotations[page] || []).filter((x) => x.grupo === a.grupo) : [a];
+    for (const t of alvos) {
+      // a coluna nasce centrada na linha do item (y = centro - size*0.7): manter esse centro ao
+      // trocar de corpo, senão diminuir a fonte desce a coluna inteira em relação às linhas
+      if (t.grupo) t.y = Math.max(0, t.y + (t.size - size) * 0.7);
+      t.size = size;
+    }
+    doc.saved = false; tick();
+  };
+  // ---- tamanho do texto: vale para o item selecionado e para o próximo a ser inserido ----
+  // (declarado depois de findText/resizeText porque lê os dois)
+  const selText = (() => {
+    const a = findText(selectedId);
+    return a && (a.type === "text" || a.type === "symbol") ? a : null;
+  })();
+  const tamanhoAtual = Math.max(6, Math.min(tetoFonte, Math.round(selText ? selText.size : fonte)));
+  const aplicarTamanho = (n) => {
+    setFonte(n);
+    if (selText) resizeText(selText.id, n); // com uma caixa de coluna selecionada, muda todas
   };
   // setas do teclado: desloca o item selecionado; devolve true se consumiu a tecla
   const nudgeSelected = (dx, dy) => {
@@ -2390,7 +2437,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     if (glosas.valorApurado != null)
       linhas.push(`Valor Apurado: R$ ${moeda(glosas.valorApurado)}`);
     // mesmo tamanho de fonte do texto avulso; nasce onde o analista está olhando
-    const size = Math.max(9, Math.min(22, Math.round(15 / scale)));
+    const size = tamanhoAtual;
     const m = mainRef.current;
     const x = m ? (m.scrollLeft + 40) / scale : 40;
     const y = m ? (m.scrollTop + 40) / scale : 40;
@@ -3310,6 +3357,17 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           <span className="text-xs text-[var(--muted)] w-5 text-center hidden sm:inline">{thickness}</span>
         </div>
 
+        {/* corpo do texto: mexe no item selecionado (coluna inteira, se ele for de uma) e
+            define o tamanho do próximo texto inserido */}
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 pr-2 md:pr-3 border-r border-[var(--border)]">
+          <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Tamanho</span>
+          <input type="range" min="6" max={tetoFonte} step="1" value={tamanhoAtual}
+            onChange={(e) => aplicarTamanho(parseInt(e.target.value, 10))} className="w-16 md:w-20"
+            title={selText ? "Tamanho desta marcação" : "Tamanho do próximo texto inserido"}
+            style={{ accentColor: "var(--accent)" }} />
+          <span className="text-xs text-[var(--muted)] w-8 text-center hidden sm:inline">{tamanhoAtual}pt</span>
+        </div>
+
         {/* seletor do símbolo de check (✓ / ✗) — usado pela ferramenta Check */}
         <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 pr-2 md:pr-3 border-r border-[var(--border)]">
           <span className="text-xs uppercase tracking-wide text-[var(--muted)] hidden sm:inline">Marca</span>
@@ -3642,7 +3700,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                           {colGlosa.err && (
                             <div className="mb-2 text-xs text-[var(--muted)]">{colGlosa.err}</div>
                           )}
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <label className="flex flex-col gap-0.5">
                               <span className="text-[10px] uppercase text-[var(--muted)]">Valor</span>
                               <input value={colGlosa.valor} autoFocus
@@ -3660,6 +3718,16 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                                 onChange={(e) => setColGlosa((g) => ({ ...g, qtd: e.target.value }))}
                                 title="Quantas linhas recebem a glosa. Corrija se a contagem saiu errada."
                                 className="w-14 px-1.5 py-1 rounded-md text-right font-mono
+                                  border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                                  focus:outline-none focus:border-[var(--accent)]" />
+                            </label>
+                            <label className="flex flex-col gap-0.5">
+                              <span className="text-[10px] uppercase text-[var(--muted)]">Tam.</span>
+                              <input value={colGlosa.tamanho} inputMode="numeric"
+                                onFocus={(e) => e.target.select()}
+                                onChange={(e) => setColGlosa((g) => ({ ...g, tamanho: e.target.value }))}
+                                title="Corpo da fonte, em pontos. Sugerido pelo espaçamento das linhas."
+                                className="w-12 px-1.5 py-1 rounded-md text-right font-mono
                                   border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
                                   focus:outline-none focus:border-[var(--accent)]" />
                             </label>
