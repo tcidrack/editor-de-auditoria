@@ -142,15 +142,17 @@ const RE_MOEDA = /^\d{1,3}(?:\.\d{3})*,\d{2}$/;
 // recebe o valor colado espera a sequência crua. Tirar aqui poupa a limpeza à mão em toda leitura.
 const soDigitos = (txt) => String(txt || "").replace(/\D+/g, "");
 
-// Só dígitos e os separadores que sobram no recorte: os pontos e o traço do próprio código, o
-// espaço, e os "|" da moldura da tabela, que o OCR quase sempre traz junto. A vírgula fica de
-// fora de propósito — assim um valor lido ("59,68") nunca é confundido com código.
-const SO_CODIGO = /^[\d.\-\s|]*\d[\d.\-\s|]*$/;
-// A ferramenta tem dois usos: copiar o código do procedimento e copiar a descrição do item, que
-// a equipe cola na pesquisa. Limpar só o primeiro — e ele se reconhece por não ter palavra nenhuma.
+// A ferramenta copia duas coisas, e só duas: o código do procedimento e a descrição do item,
+// que a equipe cola na pesquisa. Descrição tem palavra; código não tem nenhuma — então é a
+// letra que decide, e não a pontuação.
+//
+// Listar a pontuação aceita foi a primeira tentativa, e ela quebrava: o OCR troca ponto por
+// vírgula o tempo todo nesses códigos ("11.01.,02.01-9"), e qualquer sinal fora da lista jogava
+// a leitura inteira no ramo de texto, devolvendo o código cru que o auditor teria de limpar.
+const TEM_PALAVRA = /[A-Za-zÀ-ÿ]/;
 const limparLeitura = (txt) => {
   const t = String(txt || "").trim();
-  return SO_CODIGO.test(t) ? soDigitos(t) : t;
+  return TEM_PALAVRA.test(t) ? t : soDigitos(t);
 };
 
 // "1.019,57" → 1019.57 (aceita também "1019.57" digitado com ponto)
