@@ -18,6 +18,7 @@ import JSZip from "jszip";
 import * as rascunho from "./rascunho";
 import { PREFIXO_GLOSAS, lerGlosasDoPdf, juntarPdfs, deslocarPaginas, somaHerdada } from "./juntar";
 import { useArrastarLista } from "./arrastar";
+import { agruparLinhas, palavrasDoTexto, ehItem, mesmoItem, linhaEm } from "./repeticoes";
 import { PAPEIS, usaCarimbo, usaGlosaColuna, lerCarimbo, salvarCarimbo, apagarCarimbo,
   trocarSenha } from "./conta";
 import CampoSenha from "./CampoSenha";
@@ -1107,6 +1108,187 @@ function CalculadoraGlosas({ g, aberto, alterna, totalConta, onTotalConta, onIns
   );
 }
 
+// Vl unitário da conta vem com até 4 casas ("1,2682"): arredondar a 2 erraria o total da linha
+const unitarioBR = (n) =>
+  (n || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+// glosa de uma repetição: item completo = qtde da própria linha × valor de 1 unidade;
+// mesma qtde = a qtde informada × Vl unitário da linha. 0 quando falta o que multiplicar.
+const valorRepeticao = (r, linha) => {
+  const v = r.modo === "completo"
+    ? (linha.qtd || 0) * (numeroBR(r.valorUnid) || 0)
+    : (numeroBR(r.qtd) || 0) * linha.unit;
+  return Math.round(v * 100) / 100;
+};
+
+// ---- itens repetidos: a lista do que a busca achou, para conferir antes de glosar ----
+// Não é modal de propósito: o auditor navega pelas páginas com ela aberta para ver as linhas.
+function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar, onProcesso, onDigitalizadas,
+  onAplicar, onFechar }) {
+  const cor = r.tipo === "adm" ? COR_ADM : COR_TEC;
+  const soCodigo = r.tipo === "codigo"; // só copia o código de glosa técnica: nada de valor
+  const completo = r.modo === "completo";
+  // linha sem qtde lida não tem como ser glosada por completo: fica de fora da conta
+  const semQtd = (i) => !soCodigo && completo && !(i.linha.qtd > 0);
+  const marcados = r.itens.filter((i) => i.marcado && (soCodigo || valorRepeticao(r, i.linha) > 0));
+  const total = marcados.reduce((s, i) => s + valorRepeticao(r, i.linha), 0);
+  const o = r.origem;
+  let pgAnterior = null;
+  return (
+    <div className="absolute bottom-3 right-3 z-20 w-80 max-w-[calc(100%-1.5rem)] max-h-[60%] flex flex-col
+      rounded-xl shadow-lg bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] text-sm overflow-hidden"
+      style={{ borderLeft: `4px solid ${cor}` }}>
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
+        <b className="flex-1 text-xs uppercase tracking-wide">
+          {soCodigo ? `Código ${r.ann.text}` : "Itens repetidos"} · {r.escopo === "pagina" ? "nesta página" : "no processo"}
+        </b>
+        <button onClick={onFechar} title="Fechar (Esc)"
+          className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+      </div>
+
+      <div className="px-3 py-2 flex flex-col gap-2 border-b border-[var(--border)]">
+        {o ? (
+          <div className="text-xs leading-snug">
+            <span className="font-mono">{o.codigoLido}</span>{" "}
+            <span className="text-[var(--muted)]">{o.descricao}</span>
+            <div className="text-[var(--muted)]">Vl unitário R$ {moeda(o.unit)} · glosado na pág. {r.pg}</div>
+          </div>
+        ) : r.lendo ? (
+          <div className="text-xs text-[var(--muted)]">Lendo a linha glosada…</div>
+        ) : null}
+        {r.err && <div className="text-xs text-[var(--muted)]">{r.err}</div>}
+        {o && soCodigo && (
+          <div className="text-xs text-[var(--muted)]">Só as linhas que já têm corte. O valor não muda.</div>
+        )}
+        {o && !soCodigo && (
+          <div className="flex rounded-md border border-[var(--border)] overflow-hidden text-xs">
+            {[["completo", "Item completo"], ["qtde", "Mesma qtde"]].map(([m, rot]) => (
+              <button key={m} onClick={() => onCampo("modo", m)}
+                className={`flex-1 px-2 py-1 ${r.modo === m
+                  ? "bg-[var(--accent)] text-[var(--accent-contrast)] font-semibold"
+                  : "text-[var(--muted)] hover:bg-[var(--hover)]"}`}>
+                {rot}
+              </button>
+            ))}
+          </div>
+        )}
+        {o && !soCodigo && (
+          <label className="flex items-center gap-2">
+            <span className="flex-1 text-xs text-[var(--muted)]">
+              {completo ? "Valor da glosa de 1 unidade" : "Qtde glosada em cada item"}
+            </span>
+            <input value={completo ? r.valorUnid : r.qtd} inputMode="decimal"
+              onChange={(e) => onCampo(completo ? "valorUnid" : "qtd", e.target.value)}
+              onFocus={(e) => e.target.select()}
+              className="w-20 px-1.5 py-1 rounded-md text-right font-mono text-xs
+                border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                focus:outline-none focus:border-[var(--accent)]" />
+            {!completo && (
+              <span className="text-xs font-semibold font-mono" style={{ color: cor }}>
+                = {moeda(valorRepeticao(r, o))}
+              </span>
+            )}
+          </label>
+        )}
+        {o && r.tipo === "tec" && (
+          <label className="flex items-center gap-2"
+            title="Escrito em vermelho ao lado de cada corte, inclusive do primeiro se ele ainda não tiver">
+            <span className="flex-1 text-xs text-[var(--muted)]">Código da glosa (opcional)</span>
+            <input value={r.codigoGlosa || ""} onChange={(e) => onCampo("codigoGlosa", e.target.value)}
+              placeholder="ex.: 2008"
+              className="w-20 px-1.5 py-1 rounded-md text-right font-mono text-xs
+                border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]
+                focus:outline-none focus:border-[var(--accent)]" />
+          </label>
+        )}
+        {r.lendo && r.lendo.total > 0 && (
+          <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+            <span className="flex-1">
+              {r.lendo.ocr
+                ? `Lendo a pág. ${r.lendo.pagina} (digitalizada, mais lenta) · ${r.lendo.feitas} de ${r.lendo.total}`
+                : `Procurando… ${r.lendo.feitas} de ${r.lendo.total} páginas`}
+            </span>
+            <button onClick={onParar}
+              className="px-2 py-0.5 rounded-md border border-[var(--border)] hover:bg-[var(--hover)]">Parar</button>
+          </div>
+        )}
+        {r.parado && <div className="text-xs text-[var(--muted)]">Busca interrompida — a lista mostra só o que já foi lido.</div>}
+        {r.pulei > 0 && !r.lendo && (
+          <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+            <span className="flex-1">
+              {r.pulei} {r.pulei === 1 ? "página digitalizada ficou" : "páginas digitalizadas ficaram"} de
+              fora (em geral são anexos). Ler leva alguns segundos por página.
+            </span>
+            <button onClick={onDigitalizadas}
+              className="shrink-0 px-2 py-0.5 rounded-md border border-[var(--border)] hover:bg-[var(--hover)]">
+              Ler também
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-auto maida-scroll">
+        {o && !r.lendo && !r.itens.length && (
+          <div className="px-3 py-3 text-xs text-[var(--muted)]">
+            {soCodigo ? "Nenhuma outra linha cortada deste item" : "Nenhuma outra ocorrência"}{" "}
+            {r.escopo === "pagina" ? "nesta página" : "no processo"}.
+          </div>
+        )}
+        {r.itens.map((i) => {
+          const cab = i.pg !== pgAnterior;
+          pgAnterior = i.pg;
+          return (
+            <div key={i.id}>
+              {cab && (
+                <button onClick={() => onIr(i.pg)} title="Ir para a página"
+                  className={`w-full text-left px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide
+                    hover:text-[var(--text)] ${i.pg === pagina ? "text-[var(--accent)]" : "text-[var(--muted)]"}`}>
+                  pág. {i.pg}{i.pg === pagina ? " · na tela" : " →"}
+                </button>
+              )}
+              <label className="flex items-center gap-2 px-3 py-1 text-xs hover:bg-[var(--hover)] cursor-pointer">
+                <input type="checkbox" checked={i.marcado} onChange={() => onMarcar(i.id)} />
+                <span className="flex-1 truncate" title={i.linha.descricao}>{i.linha.descricao || i.linha.codigoLido}</span>
+                <span className="text-[var(--muted)] shrink-0" title="Quantidade cobrada nesta linha">
+                  {i.linha.qtd > 0 ? `qtd ${moeda(i.linha.qtd).replace(/,00$/, "")}` : ""}
+                </span>
+                {soCodigo ? null : semQtd(i)
+                  ? <span className="shrink-0 text-[10px] text-[var(--muted)]">qtde não lida</span>
+                  : <b className="shrink-0 font-mono tabular-nums" style={{ color: cor }}>
+                    {moeda(valorRepeticao(r, i.linha))}</b>}
+                {i.ja && <span className="shrink-0 text-[10px] text-[var(--muted)]">
+                  {soCodigo ? "já tem código" : "já glosado"}</span>}
+              </label>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="px-3 py-2 flex flex-col gap-1.5 border-t border-[var(--border)]">
+        {r.itens.length > 1 && (
+          <div className="flex gap-3 text-xs text-[var(--muted)]">
+            <button onClick={() => onTodos(true)} className="hover:text-[var(--text)]">marcar todos</button>
+            <button onClick={() => onTodos(false)} className="hover:text-[var(--text)]">nenhum</button>
+          </div>
+        )}
+        {r.escopo === "pagina" && o && !r.lendo && (
+          <button onClick={onProcesso}
+            className="w-full px-2 py-1.5 rounded-md text-xs font-semibold
+              border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]">
+            Procurar em todo o processo
+          </button>
+        )}
+        <button onClick={onAplicar} disabled={!marcados.length}
+          className="w-full px-2 py-1.5 rounded-md text-xs font-semibold
+            bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 disabled:opacity-40">
+          {soCodigo
+            ? `Aplicar código em ${marcados.length} ${marcados.length === 1 ? "item" : "itens"}`
+            : `Glosar ${marcados.length} ${marcados.length === 1 ? "item" : "itens"} · R$ ${moeda(total)}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---- tela de atalhos (tecla ?) ----
 function AjudaAtalhos({ secoes, onFechar }) {
   return (
@@ -1459,6 +1641,11 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const [ocrHold, setOcrHold] = useState(false); // mouse/foco no balão: pausa o fechamento
   const [glosaTec, setGlosaTec] = useState(null); // balão de confirmação da glosa técnica
   const [colGlosa, setColGlosa] = useState(null); // balão da glosa em coluna
+  // itens repetidos: o balão que oferece a busca, o painel que lista o achado e o aviso de desfazer
+  const [repetir, setRepetir] = useState(null);         // { docId, pg, tipo, ann, x, y }
+  const [repeticoes, setRepeticoes] = useState(null);   // ver buscarRepeticoes
+  const [desfazerRep, setDesfazerRep] = useState(null); // { docId, grupo, n, paginas }
+  const buscaRep = useRef(null);                        // { parar } da busca em andamento
   const textSeq = useRef(0);
   const ultimoValorCol = useRef("");  // o valor da última coluna, para não redigitar na seguinte
   const grupoSeq = useRef(0);         // identifica as caixas nascidas do mesmo arrasto
@@ -1477,8 +1664,20 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   // limpa edição/seleção ao trocar de documento ou página
   useEffect(() => {
     setEditingId(null); setSelectedId(null); setOcr(null); setOcrHold(false); setGlosaTec(null);
-    setColGlosa(null);
+    setColGlosa(null); setRepetir(null);
   }, [activeId, page]);
+  // o painel de repetições sobrevive à troca de página (o auditor vai conferir as linhas),
+  // mas não à troca de documento: as páginas listadas são de outro arquivo
+  useEffect(() => {
+    if (buscaRep.current) buscaRep.current.parar = true;
+    setRepeticoes(null); setDesfazerRep(null);
+  }, [activeId]);
+  // o aviso de desfazer some sozinho; o Ctrl+Z da página continua valendo depois
+  useEffect(() => {
+    if (!desfazerRep) return;
+    const t = setTimeout(() => setDesfazerRep(null), 10000);
+    return () => clearTimeout(t);
+  }, [desfazerRep]);
 
   // mantém o campo do rodapé em sincronia quando a página muda por fora (setas, troca de doc)
   useEffect(() => { setPageInput(String(page)); }, [page, activeId]);
@@ -2047,9 +2246,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   // lê uma área da página e devolve { texto, palavras, linhas } — palavras e linhas trazem as
   // coordenadas em pontos do documento, que é o que permite saber qual coluna da tabela cada
   // número ocupa (glosa técnica) e onde fica cada item da lista (glosa em coluna).
-  const lerRegiaoTexto = async (r, { escala = 6 } = {}) => {
-    const doc = getActive(); if (!doc || !doc.pdfDoc) return null;
-    const pageObj = await doc.pdfDoc.getPage(page);
+  // `doc`/`pg` só mudam na busca de itens repetidos, que lê páginas que não estão na tela
+  const lerRegiaoTexto = async (r, { escala = 6, doc = getActive(), pg = page } = {}) => {
+    if (!doc || !doc.pdfDoc) return null;
+    const pageObj = await doc.pdfDoc.getPage(pg);
     // Recorte em alta resolução: renderiza a página inteira deslocada, num canvas do
     // tamanho da área (as coords do app já são pontos do PDF — ver toDoc).
     // A margem extra é essencial: o tesseract erra muito quando o texto encosta na borda
@@ -2063,7 +2263,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       Math.sqrt(16e6 / Math.max(1, (r.w + MG * 2) * (r.h + MG * 2)))));
     // mesma rotação do render principal: as coords da seleção estão no espaço da tela,
     // e sem isso o recorte lido pelo tesseract sairia de outro lugar da página
-    const vp = pageObj.getViewport({ scale: S, rotation: pageObj.rotate + giroDaPagina(doc, page) });
+    const vp = pageObj.getViewport({ scale: S, rotation: pageObj.rotate + giroDaPagina(doc, pg) });
     const cv = document.createElement("canvas");
     cv.width = Math.max(1, Math.round((r.w + MG * 2) * S));
     cv.height = Math.max(1, Math.round((r.h + MG * 2) * S));
@@ -2159,7 +2359,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     g.ann.glosaQtd = qtd; g.ann.glosaUnit = unit;
     g.ann.glosa = Math.round(qtd * unit * 100) / 100;
     const d = getActive(); if (d) d.saved = false;
-    setGlosaTec(null); tick();
+    setGlosaTec(null); oferecerRepeticao("tec", g.ann); tick();
   };
 
   // ---- glosa em coluna: um "G <valor>" ao lado de cada linha da faixa arrastada ----
@@ -2259,6 +2459,290 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     setColGlosa(null); setTool("select"); setSelectedId(primeiro); tick();
   };
 
+  // ---- glosa em itens repetidos: "nesta página" / "em todo o processo" ----
+  // A glosa em coluna resolve os iguais em sequência. Aqui é o caso espalhado: o mesmo item
+  // volta algumas linhas depois, ou em outra página. Glosado o primeiro, um balão oferece glosar
+  // os outros; a busca lista o que achou e o auditor confere antes de aplicar — o OCR erra, e
+  // itens diferentes às vezes dividem código e preço (SONDA LEVINE 14FR/16FR/18FR/20FR).
+  //
+  // "Igual" = mesmo código (só os dígitos) e mesmo Vl unitário — ver src/repeticoes.js.
+  // As linhas saem da camada de texto do PDF quando a página tem uma (instantâneo e exato); só a
+  // página digitalizada passa pelo OCR, que é o que faz a busca no processo todo demorar.
+  const linhasDaPagina = async (doc, pg, { soTexto = false } = {}) => {
+    // cache preso ao pdfDoc: juntar ou reabrir troca o pdfDoc e o cache velho cai sozinho.
+    // O giro entra na chave porque as coordenadas das linhas são as da página girada.
+    if (!doc.linhasCache || doc.linhasCache.pdf !== doc.pdfDoc)
+      doc.linhasCache = { pdf: doc.pdfDoc, map: new Map() };
+    const map = doc.linhasCache.map, chave = pg + ":" + giroDaPagina(doc, pg);
+    if (map.has(chave)) return map.get(chave);
+    const pageObj = await doc.pdfDoc.getPage(pg);
+    const vp = pageObj.getViewport({ scale: 1, rotation: pageObj.rotate + giroDaPagina(doc, pg) });
+    const palavras = palavrasDoTexto((await pageObj.getTextContent()).items, vp);
+    let linhas = agruparLinhas(palavras);
+    // Página digitalizada ainda pode ter uns poucos textos (o rodapé que o SEI carimba). Tem
+    // tabela na camada de texto → usa. Muito texto sem tabela → é um relatório, nada a procurar.
+    // Pouco texto → é imagem, e só o OCR enxerga.
+    if (!linhas.some(ehItem) && palavras.length < 80) {
+      if (soTexto) return null;
+      const lido = await lerRegiaoTexto({ x: 0, y: 0, w: vp.width, h: vp.height }, { escala: 4, doc, pg });
+      linhas = agruparLinhas((lido && lido.palavras) || []);
+    }
+    map.set(chave, linhas);
+    return linhas;
+  };
+  // altura da glosa na página: o meio do traço técnico, ou o meio da caixa "G" / do código
+  // (a caixa nasce com o texto a ~0,7 do corpo abaixo do topo — ver aplicarColunaGlosa)
+  const centroGlosa = (a) => {
+    if (a.type === "pen") {
+      const ys = a.points.map((q) => q.y);
+      return (Math.min(...ys) + Math.max(...ys)) / 2;
+    }
+    return a.y + (a.size || 10) * 0.7;
+  };
+  const ehGlosaDoTipo = (a, tipo) => tipo === "tec"
+    ? a.type === "pen" && a.glosa > 0
+    : a.type === "text" && classeGlosa(a.color) === "adm" && valorGlosa(a.text) != null;
+  // a linha já tem glosa do mesmo tipo? entra na lista desmarcada, para não glosar duas vezes
+  const jaGlosada = (doc, pg, l, tipo) => (doc.annotations[pg] || []).some((a) => {
+    if (!ehGlosaDoTipo(a, tipo)) return false;
+    const cy = centroGlosa(a);
+    return cy >= l.y0 - 2 && cy <= l.y1 + 2;
+  });
+  const oferecerRepeticao = (tipo, ann, corte = null) => {
+    let x, y;
+    if (ann.type === "pen") {
+      x = Math.min(...ann.points.map((q) => q.x));
+      y = Math.max(...ann.points.map((q) => q.y)) + 4;
+    } else { x = ann.x; y = ann.y + (ann.h || 24); }
+    setRepetir({ docId: activeId, pg: page, tipo, ann, corte, x, y });
+  };
+  // Texto recém-escrito: um "G <valor>" azul é glosa administrativa; um texto vermelho colado
+  // num corte confirmado é o código de glosa técnica. Se o balão do corte ainda está aberto (os
+  // cortes não foram replicados), ele continua e o código vai junto com os cortes. Senão os
+  // cortes já foram replicados antes, e o que falta é só o código: tipo "codigo", sem valor.
+  const oferecerPeloTexto = (a) => {
+    const cls = classeGlosa(a.color);
+    if (cls === "adm" && !a.grupo && valorGlosa(a.text) != null) { oferecerRepeticao("adm", a); return; }
+    if (cls !== "tec") return;
+    const doc = getActive(); if (!doc) return;
+    const cy = centroGlosa(a);
+    let corte = null, dist = 14;
+    for (const x of doc.annotations[page] || []) {
+      if (!ehGlosaDoTipo(x, "tec")) continue;
+      const d = Math.abs(centroGlosa(x) - cy);
+      if (d <= dist) { dist = d; corte = x; }
+    }
+    if (!corte) return;
+    if (repetir && repetir.tipo === "tec" && repetir.ann === corte) return;
+    oferecerRepeticao("codigo", a, corte);
+  };
+  // o código de glosa técnica da linha: o texto vermelho mais perto dela. `folga` em alturas de
+  // linha — às vezes o código fica entre duas linhas cortadas e vale para as duas.
+  const codigoAoLado = (doc, pg, l, folga = 1.2) => {
+    let achado = null, dist = Math.max(8, l.y1 - l.y0) * folga;
+    for (const a of doc.annotations[pg] || []) {
+      if (a.type !== "text" || classeGlosa(a.color) !== "tec") continue;
+      const d = Math.abs(centroGlosa(a) - l.cy);
+      if (d <= dist) { dist = d; achado = a; }
+    }
+    return achado;
+  };
+  const temCodigo = (doc, pg, l) => !!codigoAoLado(doc, pg, l, 0.8);
+  // onde este técnico costuma pôr o código: o deslocamento de um código já escrito ao lado de
+  // algum corte do documento, em relação ao início do traço e ao meio dele
+  const posicaoDeCodigo = (doc) => {
+    for (const lista of Object.values(doc.annotations)) {
+      for (const a of lista || []) {
+        if (a.type !== "text" || classeGlosa(a.color) !== "tec") continue;
+        const corte = (lista || []).find((x) => ehGlosaDoTipo(x, "tec")
+          && Math.abs(centroGlosa(x) - centroGlosa(a)) <= 12);
+        if (corte) return {
+          dx: a.x - Math.min(...corte.points.map((q) => q.x)),
+          dy: a.y - centroGlosa(corte), size: a.size,
+        };
+      }
+    }
+    return null;
+  };
+
+  // r = { docId, pg, tipo, ann, corte }. tipo "codigo": ann é o texto do código e corte o traço
+  // ao lado dele — a linha de origem sai do corte. O painel vive em `repeticoes`:
+  // { ...r, escopo, origem, qtd, itens: [{ id, pg, linha, marcado, ja }], lendo, pulei, err }
+  // `antes` é o painel de uma busca anterior do mesmo item (ampliar para o processo, ler as
+  // digitalizadas): a qtde digitada e o que o auditor já desmarcou continuam valendo.
+  const buscarRepeticoes = async (r, escopo, { comOcr = false, antes = null } = {}) => {
+    const doc = store.current.docs.find((d) => d.id === r.docId);
+    if (!doc || !doc.pdfDoc) return;
+    if (buscaRep.current) buscaRep.current.parar = true;
+    const busca = { parar: false };
+    buscaRep.current = busca;
+    setRepetir(null);
+    const marcasAntes = new Map(antes ? antes.itens.map((i) => [i.id, i.marcado]) : []);
+    setRepeticoes({
+      docId: r.docId, pg: r.pg, tipo: r.tipo, ann: r.ann, corte: r.corte, escopo,
+      origem: null, itens: [], err: "", qtd: antes ? antes.qtd : "",
+      modo: (antes && antes.modo) || r.modo || "qtde", valorUnid: antes ? antes.valorUnid : "",
+      codigoGlosa: antes ? antes.codigoGlosa : undefined,
+      lendo: { feitas: 0, total: 0, origem: true },
+    });
+    // uma busca parada ou substituída não escreve mais no painel
+    const atualiza = (f) => setRepeticoes((x) => (x && buscaRep.current === busca ? f(x) : x));
+    try {
+      // Conta digital (a da glosa tem camada de texto) → as páginas digitalizadas do processo
+      // costumam ser anexos: prontuário, documentos. Ler cada uma por OCR levaria minutos à toa,
+      // então elas só entram se a própria conta for digitalizada ou se o auditor pedir.
+      let linhasOrigem = await linhasDaPagina(doc, r.pg, { soTexto: true });
+      const contaDigitalizada = !linhasOrigem;
+      if (!linhasOrigem) linhasOrigem = await linhasDaPagina(doc, r.pg);
+      const origem = linhaEm(linhasOrigem, centroGlosa(r.corte || r.ann));
+      if (!ehItem(origem)) {
+        atualiza((x) => ({ ...x, lendo: null,
+          err: "Não consegui ler o código e o valor unitário desta linha — sem eles não dá para achar os iguais." }));
+        return;
+      }
+      // qtde sugerida: a do corte técnico; na administrativa, quantas unidades o "G" representa
+      let sug = 1;
+      if (r.tipo === "tec") sug = r.ann.glosaQtd || 1;
+      else {
+        const q = valorGlosa(r.ann.text) / origem.unit, n = Math.round(q);
+        if (n >= 1 && Math.abs(q - n) < 0.01) sug = n;
+      }
+      const pags = escopo === "pagina" ? [r.pg] : Array.from({ length: doc.numPages }, (_, i) => i + 1);
+      atualiza((x) => ({ ...x, origem, qtd: x.qtd || moeda(sug).replace(/,00$/, ""),
+        valorUnid: x.valorUnid || unitarioBR(origem.unit), // sugestão: o Vl unitário da conta
+        // código de glosa técnica: já vem com o que o técnico escreveu ao lado do corte, se escreveu
+        codigoGlosa: x.codigoGlosa ?? ((r.tipo === "tec" && codigoAoLado(doc, r.pg, origem)?.text) || ""),
+        lendo: { feitas: 0, total: pags.length } }));
+      const junta = (pg, linhas) => {
+        const novos = [];
+        for (const l of linhas) {
+          if (pg === r.pg && Math.abs(l.cy - origem.cy) < 1) continue; // a própria glosada
+          if (!mesmoItem(l, origem)) continue;
+          // o código só vai onde já há corte; "já tem" = já tem código
+          if (r.tipo === "codigo" && !jaGlosada(doc, pg, l, "tec")) continue;
+          const ja = r.tipo === "codigo" ? temCodigo(doc, pg, l) : jaGlosada(doc, pg, l, r.tipo);
+          const id = pg + ":" + l.cy.toFixed(1);
+          novos.push({ id, pg, linha: l, marcado: marcasAntes.has(id) ? marcasAntes.get(id) : !ja, ja });
+        }
+        if (novos.length) atualiza((x) => ({ ...x, itens: [...x.itens, ...novos]
+          .sort((a, b) => a.pg - b.pg || a.linha.cy - b.linha.cy) }));
+      };
+      // 1ª volta: as páginas com camada de texto, que saem na hora; 2ª: as digitalizadas
+      let feitas = 0;
+      const semTexto = [];
+      for (const pg of pags) {
+        if (busca.parar) return;
+        const linhas = await linhasDaPagina(doc, pg, { soTexto: true });
+        if (linhas) { junta(pg, linhas); feitas++; } else semTexto.push(pg);
+      }
+      if (semTexto.length && !contaDigitalizada && !comOcr) {
+        atualiza((x) => ({ ...x, lendo: null, pulei: semTexto.length }));
+        return;
+      }
+      for (const pg of semTexto) {
+        if (busca.parar) return;
+        atualiza((x) => ({ ...x, lendo: { feitas, total: pags.length, pagina: pg, ocr: true } }));
+        junta(pg, await linhasDaPagina(doc, pg));
+        feitas++;
+      }
+      atualiza((x) => ({ ...x, lendo: null }));
+    } catch {
+      atualiza((x) => ({ ...x, lendo: null, err: "Falha ao ler as páginas. Tente de novo." }));
+    }
+  };
+  const pararBusca = () => {
+    if (buscaRep.current) buscaRep.current.parar = true;
+    setRepeticoes((x) => (x && x.lendo ? { ...x, lendo: null, parado: true } : x));
+  };
+  const fecharRepeticoes = () => {
+    if (buscaRep.current) buscaRep.current.parar = true;
+    buscaRep.current = null;
+    setRepeticoes(null);
+  };
+  const aplicarRepeticoes = () => {
+    const R = repeticoes; if (!R || !R.origem) return;
+    const doc = store.current.docs.find((d) => d.id === R.docId); if (!doc) return;
+    const marcados = R.itens.filter((i) => i.marcado && (R.tipo === "codigo" || valorRepeticao(R, i.linha) > 0));
+    if (!marcados.length) return;
+    const o = R.origem, orig = R.ann;
+    const grupo = "gr" + ++grupoSeq.current; // um lote só: Ctrl+Z (por página) e o Desfazer do aviso
+    // Código de glosa técnica: o do campo do painel. A caixa-modelo é o código já escrito ao lado
+    // do corte de origem (mesma posição e corpo, texto do campo); sem ele, a posição em que o
+    // técnico pôs código em outro corte; sem nenhum, à esquerda do traço. Origem sem código
+    // ganha a caixa também — o código digitado vale para todas as linhas glosadas.
+    let codigo = R.tipo === "codigo" ? R.ann : null, codigoNaOrigem = null;
+    const cod = String(R.codigoGlosa || "").trim();
+    if (R.tipo === "tec" && cod) {
+      const aoLado = codigoAoLado(doc, R.pg, o);
+      if (aoLado) codigo = { ...aoLado, text: cod };
+      else {
+        const minX = Math.min(...orig.points.map((q) => q.x));
+        const ref = posicaoDeCodigo(doc);
+        const size = ref ? ref.size : tamanhoAtual;
+        codigo = {
+          type: "text", text: cod, size, color: COR_TEC, w: 120, h: 24,
+          x: Math.max(0, ref ? minX + ref.dx : minX - size * 0.6 * cod.length - 12),
+          y: Math.max(0, ref ? centroGlosa(orig) + ref.dy : o.cy - size * 0.7),
+        };
+        codigoNaOrigem = codigo;
+      }
+    }
+    const paginas = new Set();
+    if (codigoNaOrigem)
+      (doc.annotations[R.pg] = doc.annotations[R.pg] || []).push(
+        { ...codigoNaOrigem, id: "t" + ++textSeq.current, grupo });
+    for (const it of marcados) {
+      const l = it.linha;
+      const dy = l.cy - o.cy;
+      // mesma tabela em outra página pode vir deslocada na horizontal: alinha pela coluna Qtde
+      const dx = l.xQtd != null && o.xQtd != null ? l.xQtd - o.xQtd : 0;
+      const lista = (doc.annotations[it.pg] = doc.annotations[it.pg] || []);
+      if (R.tipo === "codigo") {
+        // só o código: o corte da linha já está lá e já fez a conta
+        lista.push({ ...codigo, id: "t" + ++textSeq.current, grupo, y: Math.max(0, codigo.y + dy) });
+        paginas.add(it.pg);
+        continue;
+      }
+      const valor = valorRepeticao(R, l);
+      if (R.tipo === "tec") {
+        const completo = R.modo === "completo";
+        lista.push({
+          type: "pen", grupo, color: orig.color, thickness: orig.thickness,
+          points: orig.points.map((q) => ({ x: q.x + dx, y: q.y + dy })),
+          glosa: valor,
+          glosaQtd: completo ? l.qtd : numeroBR(R.qtd),
+          glosaUnit: completo ? numeroBR(R.valorUnid) : l.unit,
+        });
+        if (codigo) lista.push({ ...codigo, id: "t" + ++textSeq.current, grupo, y: Math.max(0, codigo.y + dy) });
+      } else {
+        lista.push({
+          type: "text", id: "t" + ++textSeq.current, grupo,
+          x: Math.max(0, orig.x + dx), y: Math.max(0, orig.y + dy),
+          text: `G ${moeda(valor)}`, size: orig.size, color: COR_ADM, w: orig.w || 120, h: orig.h || 24,
+        });
+      }
+      paginas.add(it.pg);
+    }
+    doc.saved = false; redo.current = [];
+    fecharRepeticoes();
+    setDesfazerRep({ docId: doc.id, grupo, n: marcados.length, paginas: paginas.size, tipo: R.tipo });
+    drawOverlay(); tick();
+  };
+  // desfaz o lote em todas as páginas de uma vez (o Ctrl+Z só alcança a página da tela)
+  const desfazerRepeticoes = () => {
+    const d = desfazerRep; setDesfazerRep(null); if (!d) return;
+    const doc = store.current.docs.find((x) => x.id === d.docId); if (!doc) return;
+    for (const pg of Object.keys(doc.annotations)) {
+      const lista = doc.annotations[pg] || [];
+      const anns = lista.filter((a) => a.grupo === d.grupo);
+      if (!anns.length) continue;
+      doc.annotations[pg] = lista.filter((a) => a.grupo !== d.grupo);
+      redo.current.push({ docId: doc.id, page: +pg, anns });
+    }
+    doc.saved = false;
+    setSelectedId(null); drawOverlay(); tick();
+  };
+
   // ---- linha-guia horizontal (1 clique atravessa a largura da página) ----
   const addLine = (p) => {
     const doc = getActive(); if (!doc) return;
@@ -2324,7 +2808,9 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   // de Tamanho da toolbar — os dois entram por aqui.
   const resizeText = (id, size) => {
     const doc = getActive(); const a = findText(id); if (!doc || !a) return;
-    const alvos = a.grupo ? (doc.annotations[page] || []).filter((x) => x.grupo === a.grupo) : [a];
+    // o lote das repetições técnicas mistura traço e texto: só as caixas do mesmo tipo mudam
+    const alvos = a.grupo
+      ? (doc.annotations[page] || []).filter((x) => x.grupo === a.grupo && x.type === a.type) : [a];
     for (const t of alvos) {
       // a coluna nasce centrada na linha do item (y = centro - size*0.7): manter esse centro ao
       // trocar de corpo, senão diminuir a fonte desce a coluna inteira em relação às linhas
@@ -2371,6 +2857,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     if (a && !a.text.trim()) { deleteText(id); setTool("select"); return; }
     setEditingId(null);
     setTool("select"); // desmarca a ferramenta Texto após inserir
+    if (a && a.text !== editOrig.current) oferecerPeloTexto(a);
   };
   // inicia edição guardando o texto original (para permitir desistir/reverter)
   const startEditText = (id) => {
@@ -3149,6 +3636,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     if (stampsOpen) { setStampsOpen(false); return; }
     if (glosaTec) { setGlosaTec(null); return; }
     if (colGlosa) { setColGlosa(null); return; }
+    if (repetir) { setRepetir(null); return; }
+    if (repeticoes) { fecharRepeticoes(); return; }
     if (ocr) { setOcr(null); setOcrHold(false); return; }
     if (selectedId) { setSelectedId(null); return; }
     if (tool !== "select") setTool("select");
@@ -3755,6 +4244,77 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                     </div>
                   </div>
                 )}
+                {/* depois de uma glosa: oferece glosar o mesmo item onde mais ele aparecer */}
+                {repetir && repetir.docId === activeId && repetir.pg === page && (
+                  <div style={{
+                    position: "absolute", zIndex: 6, pointerEvents: "auto",
+                    left: repetir.x * scale, top: repetir.y * scale + 6, lineHeight: 1.3,
+                  }}>
+                    <div className="flex flex-wrap items-center gap-1.5 p-2 rounded-lg shadow-lg text-xs
+                      bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]"
+                      style={{ borderLeft: `4px solid ${repetir.tipo === "adm" ? COR_ADM : COR_TEC}` }}>
+                      {/* 1º passo: item inteiro (cada linha com a própria qtde) ou a mesma qtde
+                          em todas — a qtde cobrada muda de linha para linha */}
+                      {repetir.tipo === "codigo" ? (
+                        <>
+                          <span className="text-[var(--muted)]">
+                            Aplicar o código <b className="text-[var(--text)]">{repetir.ann.text}</b> também:
+                          </span>
+                          <button onClick={() => buscarRepeticoes(repetir, "pagina")}
+                            className="px-2 py-1 rounded-md font-semibold
+                          border border-[var(--border)] hover:bg-[var(--hover)]">
+                            Nesta página
+                          </button>
+                          <button onClick={() => buscarRepeticoes(repetir, "processo")}
+                            className="px-2 py-1 rounded-md font-semibold
+                          bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+                            Em todo o processo
+                          </button>
+                        </>
+                      ) : !repetir.modo ? (
+                        <>
+                          <span className="text-[var(--muted)]">Glosar o item por completo nas repetições?</span>
+                          <button onClick={() => setRepetir((x) => ({ ...x, modo: "completo" }))}
+                            title="Cada linha é glosada inteira: qtde da linha × valor de 1 unidade"
+                            className="px-2 py-1 rounded-md font-semibold
+                          bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+                            Item completo
+                          </button>
+                          <button onClick={() => setRepetir((x) => ({ ...x, modo: "qtde" }))}
+                            title="Todas as linhas recebem a mesma qtde glosada"
+                            className="px-2 py-1 rounded-md font-semibold
+                          border border-[var(--border)] hover:bg-[var(--hover)]">
+                            Mesma qtde
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-[var(--muted)]">
+                            {repetir.modo === "completo" ? "Item completo" : "Mesma qtde"} — glosar também:
+                          </span>
+                          <button onClick={() => buscarRepeticoes(repetir, "pagina")}
+                            className="px-2 py-1 rounded-md font-semibold
+                          border border-[var(--border)] hover:bg-[var(--hover)]">
+                            Nesta página
+                          </button>
+                          <button onClick={() => buscarRepeticoes(repetir, "processo")}
+                            className="px-2 py-1 rounded-md font-semibold
+                          bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+                            Em todo o processo
+                          </button>
+                        </>
+                      )}
+                      <button onClick={() => setRepetir(null)} title="Fechar (Esc)"
+                        className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+                    </div>
+                    {repetir.tipo === "tec" && (
+                      <div className="mt-1 px-1 text-[10px] text-[var(--muted)]"
+                        style={{ textShadow: "0 0 3px var(--surface)" }}>
+                        Digite o código de glosa ao lado antes: ele é copiado junto.
+                      </div>
+                    )}
+                  </div>
+                )}
                 {/* confirmação da glosa técnica (qtd cortada × valor unitário) */}
                 {glosaTec && (
                   <div
@@ -3843,6 +4403,39 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
             onIrPara={goToPage}
             onRemover={removerGlosa}
           />
+        )}
+
+        {/* itens repetidos: conferir o que a busca achou antes de glosar */}
+        {repeticoes && (
+          <PainelRepeticoes
+            r={repeticoes}
+            pagina={page}
+            onCampo={(campo, v) => setRepeticoes((x) => ({ ...x, [campo]: v }))}
+            onMarcar={(id) => setRepeticoes((x) => ({
+              ...x, itens: x.itens.map((i) => (i.id === id ? { ...i, marcado: !i.marcado } : i)),
+            }))}
+            onTodos={(v) => setRepeticoes((x) => ({ ...x, itens: x.itens.map((i) => ({ ...i, marcado: v })) }))}
+            onIr={goToPage}
+            onParar={pararBusca}
+            onProcesso={() => buscarRepeticoes(repeticoes, "processo", { antes: repeticoes })}
+            onDigitalizadas={() => buscarRepeticoes(repeticoes, repeticoes.escopo, { comOcr: true, antes: repeticoes })}
+            onAplicar={aplicarRepeticoes}
+            onFechar={fecharRepeticoes}
+          />
+        )}
+        {desfazerRep && !repeticoes && (
+          <div className="absolute bottom-3 right-3 z-20 flex items-center gap-3 px-3 py-2 rounded-lg shadow-lg
+            text-sm bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]">
+            <span>
+              {desfazerRep.tipo === "codigo" ? "Código aplicado" : "Glosado"} em {desfazerRep.n}{" "}
+              {desfazerRep.n === 1 ? "linha" : "linhas"}
+              {desfazerRep.paginas > 1 ? ` de ${desfazerRep.paginas} páginas` : ""}
+            </span>
+            <button onClick={desfazerRepeticoes}
+              className="text-xs font-semibold text-[var(--accent)] hover:underline">Desfazer</button>
+            <button onClick={() => setDesfazerRep(null)} title="Fechar"
+              className="px-1 rounded text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+          </div>
         )}
       </div>
 
