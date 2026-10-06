@@ -1134,10 +1134,10 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
   const o = r.origem;
   let pgAnterior = null;
   return (
-    <div className="absolute bottom-3 right-3 z-20 w-80 max-w-[calc(100%-1.5rem)] max-h-[60%] flex flex-col
+    <div className="absolute bottom-3 right-3 z-20 w-80 max-w-[calc(100%-1.5rem)] max-h-[calc(100%-1.5rem)] flex flex-col
       rounded-xl shadow-lg bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] text-sm overflow-hidden"
       style={{ borderLeft: `4px solid ${cor}` }}>
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
+      <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
         <b className="flex-1 text-xs uppercase tracking-wide">
           {soCodigo ? `Código ${r.ann.text}` : "Itens repetidos"} · {r.escopo === "pagina" ? "nesta página" : "no processo"}
         </b>
@@ -1145,6 +1145,8 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
           className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
       </div>
 
+      {/* configuração e lista rolam juntas: falte a altura que faltar, o rodapé com os botões fica na tela */}
+      <div className="flex-1 min-h-0 overflow-auto maida-scroll">
       <div className="px-3 py-2 flex flex-col gap-2 border-b border-[var(--border)]">
         {o ? (
           <div className="text-xs leading-snug">
@@ -1226,7 +1228,7 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto maida-scroll">
+      <div>
         {o && !r.lendo && !r.itens.length && (
           <div className="px-3 py-3 text-xs text-[var(--muted)]">
             {soCodigo ? "Nenhuma outra linha cortada deste item" : "Nenhuma outra ocorrência"}{" "}
@@ -1262,8 +1264,9 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
           );
         })}
       </div>
+      </div>
 
-      <div className="px-3 py-2 flex flex-col gap-1.5 border-t border-[var(--border)]">
+      <div className="shrink-0 px-3 py-2 flex flex-col gap-1.5 border-t border-[var(--border)]">
         {r.itens.length > 1 && (
           <div className="flex gap-3 text-xs text-[var(--muted)]">
             <button onClick={() => onTodos(true)} className="hover:text-[var(--text)]">marcar todos</button>
@@ -2687,6 +2690,22 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         codigoNaOrigem = codigo;
       }
     }
+    // a glosa de origem segue a mesma regra das repetições (item completo / mesma qtde); os
+    // campos antigos ficam guardados para o Desfazer do aviso
+    let origemAntes = null;
+    const valorOrigem = R.tipo === "codigo" ? 0 : valorRepeticao(R, o);
+    if (valorOrigem > 0 && (doc.annotations[R.pg] || []).includes(orig)) {
+      if (R.tipo === "tec") {
+        const completo = R.modo === "completo";
+        origemAntes = { glosa: orig.glosa, glosaQtd: orig.glosaQtd, glosaUnit: orig.glosaUnit };
+        orig.glosa = valorOrigem;
+        orig.glosaQtd = completo ? o.qtd : numeroBR(R.qtd);
+        orig.glosaUnit = completo ? numeroBR(R.valorUnid) : o.unit;
+      } else {
+        origemAntes = { text: orig.text };
+        orig.text = `G ${moeda(valorOrigem)}`;
+      }
+    }
     const paginas = new Set();
     if (codigoNaOrigem)
       (doc.annotations[R.pg] = doc.annotations[R.pg] || []).push(
@@ -2725,7 +2744,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     }
     doc.saved = false; redo.current = [];
     fecharRepeticoes();
-    setDesfazerRep({ docId: doc.id, grupo, n: marcados.length, paginas: paginas.size, tipo: R.tipo });
+    setDesfazerRep({ docId: doc.id, grupo, n: marcados.length, paginas: paginas.size, tipo: R.tipo,
+      origem: origemAntes && { ann: orig, antes: origemAntes } });
     drawOverlay(); tick();
   };
   // desfaz o lote em todas as páginas de uma vez (o Ctrl+Z só alcança a página da tela)
@@ -2739,6 +2759,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       doc.annotations[pg] = lista.filter((a) => a.grupo !== d.grupo);
       redo.current.push({ docId: doc.id, page: +pg, anns });
     }
+    if (d.origem) Object.assign(d.origem.ann, d.origem.antes);
     doc.saved = false;
     setSelectedId(null); drawOverlay(); tick();
   };
@@ -4260,52 +4281,62 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
                           <span className="text-[var(--muted)]">
                             Aplicar o código <b className="text-[var(--text)]">{repetir.ann.text}</b> também:
                           </span>
-                          <button onClick={() => buscarRepeticoes(repetir, "pagina")}
-                            className="px-2 py-1 rounded-md font-semibold
-                          border border-[var(--border)] hover:bg-[var(--hover)]">
-                            Nesta página
-                          </button>
-                          <button onClick={() => buscarRepeticoes(repetir, "processo")}
-                            className="px-2 py-1 rounded-md font-semibold
-                          bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
-                            Em todo o processo
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button onClick={() => buscarRepeticoes(repetir, "pagina")}
+                              className="px-2 py-1 rounded-md font-semibold whitespace-nowrap
+                            border border-[var(--border)] hover:bg-[var(--hover)]">
+                              Nesta página
+                            </button>
+                            <button onClick={() => buscarRepeticoes(repetir, "processo")}
+                              className="px-2 py-1 rounded-md font-semibold whitespace-nowrap
+                            bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+                              Em todo o processo
+                            </button>
+                            <button onClick={() => setRepetir(null)} title="Fechar (Esc)"
+                              className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+                          </div>
                         </>
                       ) : !repetir.modo ? (
                         <>
                           <span className="text-[var(--muted)]">Glosar o item por completo nas repetições?</span>
-                          <button onClick={() => setRepetir((x) => ({ ...x, modo: "completo" }))}
-                            title="Cada linha é glosada inteira: qtde da linha × valor de 1 unidade"
-                            className="px-2 py-1 rounded-md font-semibold
-                          bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
-                            Item completo
-                          </button>
-                          <button onClick={() => setRepetir((x) => ({ ...x, modo: "qtde" }))}
-                            title="Todas as linhas recebem a mesma qtde glosada"
-                            className="px-2 py-1 rounded-md font-semibold
-                          border border-[var(--border)] hover:bg-[var(--hover)]">
-                            Mesma qtde
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button onClick={() => setRepetir((x) => ({ ...x, modo: "completo" }))}
+                              title="Cada linha é glosada inteira: qtde da linha × valor de 1 unidade"
+                              className="px-2 py-1 rounded-md font-semibold whitespace-nowrap
+                            bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+                              Item completo
+                            </button>
+                            <button onClick={() => setRepetir((x) => ({ ...x, modo: "qtde" }))}
+                              title="Todas as linhas recebem a mesma qtde glosada"
+                              className="px-2 py-1 rounded-md font-semibold whitespace-nowrap
+                            border border-[var(--border)] hover:bg-[var(--hover)]">
+                              Mesma qtde
+                            </button>
+                            <button onClick={() => setRepetir(null)} title="Fechar (Esc)"
+                              className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+                          </div>
                         </>
                       ) : (
                         <>
                           <span className="text-[var(--muted)]">
                             {repetir.modo === "completo" ? "Item completo" : "Mesma qtde"} — glosar também:
                           </span>
-                          <button onClick={() => buscarRepeticoes(repetir, "pagina")}
-                            className="px-2 py-1 rounded-md font-semibold
-                          border border-[var(--border)] hover:bg-[var(--hover)]">
-                            Nesta página
-                          </button>
-                          <button onClick={() => buscarRepeticoes(repetir, "processo")}
-                            className="px-2 py-1 rounded-md font-semibold
-                          bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
-                            Em todo o processo
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button onClick={() => buscarRepeticoes(repetir, "pagina")}
+                              className="px-2 py-1 rounded-md font-semibold whitespace-nowrap
+                            border border-[var(--border)] hover:bg-[var(--hover)]">
+                              Nesta página
+                            </button>
+                            <button onClick={() => buscarRepeticoes(repetir, "processo")}
+                              className="px-2 py-1 rounded-md font-semibold whitespace-nowrap
+                            bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90">
+                              Em todo o processo
+                            </button>
+                            <button onClick={() => setRepetir(null)} title="Fechar (Esc)"
+                              className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
+                          </div>
                         </>
                       )}
-                      <button onClick={() => setRepetir(null)} title="Fechar (Esc)"
-                        className="px-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">×</button>
                     </div>
                     {repetir.tipo === "tec" && (
                       <div className="mt-1 px-1 text-[10px] text-[var(--muted)]"
