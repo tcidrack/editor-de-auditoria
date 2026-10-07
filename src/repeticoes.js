@@ -6,8 +6,9 @@
 // Todas as coordenadas são pontos do documento no espaço da tela (página já girada) — o mesmo
 // espaço das anotações.
 
-// número do jeito que a conta imprime: "1,00", "216,6800", "1.244,32"
-const RE_NUM = /^\d{1,3}(?:\.\d{3})*,\d{2,4}$/;
+// número do jeito que a conta imprime: "1,00", "216,6800", "1.244,32" — e há conta sem o ponto
+// do milhar ("1242,10")
+const RE_NUM = /^(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2,4}$/;
 // código do item: só dígitos e separadores ("7820799.1", "4.03.08.39-1")
 const RE_COD = /^\d[\d.\-]*$/;
 // data/hora da linha ("24/08", "06:11"): marca onde a descrição acaba
@@ -71,13 +72,21 @@ export const interpretarLinha = (l, cab = null) => {
     // tabela sem valor unitário ("Qtde | Vl. Total | %"): cada número na coluna mais perto
     qtd = perto(cab.xQtd); total = perto(cab.xTotal);
     if (qtd === total) qtd = total = null;
-  } else if (nums.length >= 3) [qtd, unit, total] = nums.slice(-3);
-  else if (nums.length === 2) {
+  } else if (nums.length >= 2) {
+    [unit, total] = nums.slice(-2);
+    const iUnit = tk.indexOf(unit), vU = numBR(unit.limpo), vT = numBR(total.limpo);
+    // a Qtde é o número que fecha a conta qtd × unitário = total, o mais perto do unitário. Pula o
+    // que fica no caminho: fator de redução da guia TISS ("1,00"), glosa já gravada no PDF ("G 10,16")
+    // A data no meio da linha fecha a busca: antes dela é descrição ("Polyglactin Viol. 1 90cm")
+    for (let i = iUnit - 1; i > iCod && !qtd && !RE_DATA.test(tk[i].limpo); i--) {
+      const s = tk[i].limpo, q = numBR(s);
+      if ((RE_NUM.test(s) || /^\d{1,4}$/.test(s)) && q > 0 && Math.abs(q * vU - vT) <= q * 0.005 + 0.01) qtd = tk[i];
+    }
+    if (!qtd && nums.length >= 3) qtd = nums[nums.length - 3];
     // tabela de procedimentos: "Qt" inteiro ("| 1 |") antes de Valor | Total, que têm vírgula
-    [unit, total] = nums;
-    const iUnit = tk.indexOf(unit);
-    for (let i = iUnit - 1; i > iCod; i--)
-      if (/^\d{1,4}$/.test(tk[i].limpo)) { qtd = tk[i]; break; }
+    else if (!qtd)
+      for (let i = iUnit - 1; i > iCod; i--)
+        if (/^\d{1,4}$/.test(tk[i].limpo)) { qtd = tk[i]; break; }
   }
   const vTotal = total ? numBR(total.limpo) : null;
   const vQtd0 = qtd ? numBR(qtd.limpo) : null;
@@ -88,8 +97,11 @@ export const interpretarLinha = (l, cab = null) => {
   let i = iCod + 1;
   if (iCod < 0) while (i < tk.length && RE_DATA.test(tk[i].limpo)) i++;
   const resto = [];
-  for (const t of tk.slice(i)) {
+  for (; i < tk.length; i++) {
+    const t = tk[i];
     if (RE_DATA.test(t.limpo) || t.limpo.includes("%") || t === qtd || t === unit || t === total) break;
+    // glosa já gravada no PDF ("G 10,16") não é descrição: o item repetido sem ela tem que bater
+    if (t.limpo === "G" && tk[i + 1] && RE_NUM.test(tk[i + 1].limpo)) { i++; continue; }
     resto.push(t.limpo);
   }
   const descricao = resto.join(" ");
@@ -124,13 +136,16 @@ export const mesmoItem = (a, b) => {
 
 // a linha de uma página mais perto de uma altura — onde o auditor glosou
 export const linhaEm = (linhas, cy) => {
+  // só linha de item: a continuação da descrição quebrada ("RESPIRATORIA EM DOENTE") fica logo
+  // abaixo do código e roubava a glosa posta um pouco mais baixo
   let melhor = null, dist = Infinity;
   for (const l of linhas) {
+    if (!ehItem(l)) continue;
     const d = Math.abs(l.cy - cy);
     if (d < dist) { dist = d; melhor = l; }
   }
   // longe demais da glosa é outra linha da tabela, não a glosada
-  return melhor && dist <= Math.max(8, (melhor.y1 - melhor.y0) * 1.2) ? melhor : null;
+  return melhor && dist <= Math.max(12, (melhor.y1 - melhor.y0) * 1.5) ? melhor : null;
 };
 
 // Camada de texto do pdf.js → palavras. Cada item do getTextContent é um trecho de linha
