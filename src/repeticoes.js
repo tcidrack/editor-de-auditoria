@@ -30,11 +30,26 @@ export const agruparLinhas = (palavras) => {
     } else linhas.push({ y0: p.y0, y1: p.y1, cy, tokens: [p] });
   }
   for (const l of linhas) l.tokens.sort((a, b) => a.x0 - b.x0);
-  return linhas.map(interpretarLinha);
+  // cabeçalho da tabela vale para as linhas abaixo dele, até o próximo (uma página pode ter duas
+  // tabelas: órteses com "Qtde | Vl Unit. | Vl Total", exames com "Qtde | Vl. Total | %")
+  let cab = null;
+  return linhas.map((l) => {
+    cab = lerCabecalho(l) || cab;
+    return interpretarLinha(l, cab);
+  });
+};
+
+const meioX = (t) => (t.x0 + t.x1) / 2;
+// linha de cabeçalho: tem "Qtde" e "Total"; guarda onde ficam as colunas e se há valor unitário
+const lerCabecalho = (l) => {
+  const qt = l.tokens.find((t) => /^Qt(de|d)?\.?$/i.test(t.text));
+  const tot = l.tokens.find((t) => /^Total$/i.test(t.text));
+  if (!qt || !tot || meioX(tot) <= meioX(qt)) return null;
+  return { xQtd: meioX(qt), xTotal: meioX(tot), temUnit: l.tokens.some((t) => /unit/i.test(t.text)) };
 };
 
 // uma linha de tabela: código no começo, Qtde | Vl unitário | Vl total no fim
-export const interpretarLinha = (l) => {
+export const interpretarLinha = (l, cab = null) => {
   // borda grudada no meio ("|MUCAMBO|24/08|06:11|PAR") separa palavras, como um espaço
   const tk = [];
   for (const t of l.tokens) {
@@ -51,7 +66,12 @@ export const interpretarLinha = (l) => {
   const iCod = tk.findIndex((t) => RE_COD.test(t.limpo) && t.limpo.replace(/\D/g, "").length >= 5);
   const nums = tk.filter((t) => RE_NUM.test(t.limpo));
   let qtd = null, unit = null, total = null;
-  if (nums.length >= 3) [qtd, unit, total] = nums.slice(-3);
+  const perto = (x) => nums.reduce((m, t) => (Math.abs(meioX(t) - x) < Math.abs(meioX(m) - x) ? t : m));
+  if (cab && !cab.temUnit && nums.length >= 2) {
+    // tabela sem valor unitário ("Qtde | Vl. Total | %"): cada número na coluna mais perto
+    qtd = perto(cab.xQtd); total = perto(cab.xTotal);
+    if (qtd === total) qtd = total = null;
+  } else if (nums.length >= 3) [qtd, unit, total] = nums.slice(-3);
   else if (nums.length === 2) {
     // tabela de procedimentos: "Qt" inteiro ("| 1 |") antes de Valor | Total, que têm vírgula
     [unit, total] = nums;
@@ -60,15 +80,16 @@ export const interpretarLinha = (l) => {
       if (/^\d{1,4}$/.test(tk[i].limpo)) { qtd = tk[i]; break; }
   }
   const vTotal = total ? numBR(total.limpo) : null;
-  const vUnit = unit ? numBR(unit.limpo) : null;
-  const vQtd = qtd ? numBR(qtd.limpo) : vUnit > 0 && vTotal != null ? Math.round(vTotal / vUnit) : null;
+  const vQtd0 = qtd ? numBR(qtd.limpo) : null;
+  const vUnit = unit ? numBR(unit.limpo) : !unit && vQtd0 > 0 && vTotal != null ? vTotal / vQtd0 : null;
+  const vQtd = vQtd0 != null ? vQtd0 : vUnit > 0 && vTotal != null ? Math.round(vTotal / vUnit) : null;
   // descrição: logo depois do código; sem código, desde o começo da linha, pulando a data/hora
   // que algumas faturas põem antes do item ("10/04/2026 SOL RINGER ...")
   let i = iCod + 1;
   if (iCod < 0) while (i < tk.length && RE_DATA.test(tk[i].limpo)) i++;
   const resto = [];
   for (const t of tk.slice(i)) {
-    if (RE_DATA.test(t.limpo) || t.limpo.includes("%") || t === qtd || t === unit) break;
+    if (RE_DATA.test(t.limpo) || t.limpo.includes("%") || t === qtd || t === unit || t === total) break;
     resto.push(t.limpo);
   }
   const descricao = resto.join(" ");
