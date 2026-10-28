@@ -6,13 +6,15 @@
 // Todas as coordenadas são pontos do documento no espaço da tela (página já girada) — o mesmo
 // espaço das anotações.
 
-// número do jeito que a conta imprime: "1,00", "216,6800", "1.244,32" — e há conta sem o ponto
-// do milhar ("1242,10")
-const RE_NUM = /^(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2,4}$/;
+// número do jeito que a conta imprime: "1,00", "216,6800", "0,10000", "1.244,32" — e há conta sem
+// o ponto do milhar ("1242,10")
+const RE_NUM = /^(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2,5}$/;
 // código do item: só dígitos e separadores ("7820799.1", "4.03.08.39-1")
 const RE_COD = /^\d[\d.\-]*$/;
 // data/hora da linha ("24/08", "06:11"): marca onde a descrição acaba
 const RE_DATA = /^\d{2}[/:]\d{2}/;
+// data/hora logo antes da descrição, inclusive a hora cortada pela coluna ("00:0")
+const RE_DATA_ANTES = /^\d{2}[/:]\d/;
 const numBR = (s) => parseFloat(s.replace(/\./g, "").replace(",", "."));
 // o OCR lê as bordas da tabela ("|") como barra, colchete, I ou l grudados no texto
 const semBorda = (s) => String(s || "").replace(/^[|[\]!]+|[|[\]!]+$/g, "");
@@ -64,7 +66,11 @@ export const interpretarLinha = (l, cab = null) => {
         x0: t.x0 + w * (m.index / s.length), x1: t.x0 + w * ((m.index + m[0].length) / s.length) });
     }
   }
-  const iCod = tk.findIndex((t) => RE_COD.test(t.limpo) && t.limpo.replace(/\D/g, "").length >= 5);
+  const ehCod = (t) => RE_COD.test(t.limpo) && t.limpo.replace(/\D/g, "").length >= 5;
+  const iCod = tk.findIndex(ehCod);
+  // há conta com dois códigos na linha (guia/lote no começo, o do item depois) — guarda todos,
+  // o auditor escolhe qual identifica o item
+  const codigos = tk.filter(ehCod).map((t) => ({ digitos: t.limpo.replace(/\D/g, ""), lido: t.limpo }));
   const nums = tk.filter((t) => RE_NUM.test(t.limpo));
   let qtd = null, unit = null, total = null;
   const perto = (x) => nums.reduce((m, t) => (Math.abs(meioX(t) - x) < Math.abs(meioX(m) - x) ? t : m));
@@ -92,14 +98,15 @@ export const interpretarLinha = (l, cab = null) => {
   const vQtd0 = qtd ? numBR(qtd.limpo) : null;
   const vUnit = unit ? numBR(unit.limpo) : !unit && vQtd0 > 0 && vTotal != null ? vTotal / vQtd0 : null;
   const vQtd = vQtd0 != null ? vQtd0 : vUnit > 0 && vTotal != null ? Math.round(vTotal / vUnit) : null;
-  // descrição: logo depois do código; sem código, desde o começo da linha, pulando a data/hora
-  // que algumas faturas põem antes do item ("10/04/2026 SOL RINGER ...")
+  // descrição: logo depois do código; sem código, desde o começo da linha. Pula a data/hora que
+  // algumas faturas põem antes do item ("10/04/2026 SOL RINGER ...", "012907980 15/02/2026 00:0
+  // Creatinina 40301630") e para no segundo código, quando a linha tem dois
   let i = iCod + 1;
-  if (iCod < 0) while (i < tk.length && RE_DATA.test(tk[i].limpo)) i++;
+  while (i < tk.length && RE_DATA_ANTES.test(tk[i].limpo)) i++;
   const resto = [];
   for (; i < tk.length; i++) {
     const t = tk[i];
-    if (RE_DATA.test(t.limpo) || t.limpo.includes("%") || t === qtd || t === unit || t === total) break;
+    if (RE_DATA.test(t.limpo) || t.limpo.includes("%") || t === qtd || t === unit || t === total || ehCod(t)) break;
     // glosa já gravada no PDF ("G 10,16") não é descrição: o item repetido sem ela tem que bater
     if (t.limpo === "G" && tk[i + 1] && RE_NUM.test(tk[i + 1].limpo)) { i++; continue; }
     resto.push(t.limpo);
@@ -109,6 +116,7 @@ export const interpretarLinha = (l, cab = null) => {
     y0: l.y0, y1: l.y1, cy: l.cy,
     codigo: iCod >= 0 ? tk[iCod].limpo.replace(/\D/g, "") : "",
     codigoLido: iCod >= 0 ? tk[iCod].limpo : "",
+    codigos,
     descricao, chave: chaveDescricao(descricao),
     qtd: vQtd, unit: vUnit, total: vTotal,
     xQtd: qtd ? qtd.x0 : null,
@@ -127,10 +135,11 @@ const chaveDescricao = (d) => {
 // nas faturas que não imprimem código, a descrição
 export const ehItem = (l) => !!(l && l.unit > 0 && (l.codigo || l.chave));
 // "exatamente igual" = mesmo valor unitário e mesmo código (só os dígitos); quando um dos dois
-// não tem código, a descrição decide
+// não tem código, a descrição decide. Linha com dois códigos: basta um em comum — a busca passa
+// em `a` a origem só com o código que o auditor escolheu
 export const mesmoItem = (a, b) => {
   if (!ehItem(a) || !ehItem(b) || Math.abs(a.unit - b.unit) >= 0.005) return false;
-  if (a.codigo && b.codigo) return a.codigo === b.codigo;
+  if (a.codigo && b.codigo) return a.codigos.some((c) => b.codigos.some((d) => d.digitos === c.digitos));
   return !!a.chave && a.chave === b.chave;
 };
 

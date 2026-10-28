@@ -1123,7 +1123,7 @@ const valorRepeticao = (r, linha) => {
 // ---- itens repetidos: a lista do que a busca achou, para conferir antes de glosar ----
 // Não é modal de propósito: o auditor navega pelas páginas com ela aberta para ver as linhas.
 function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar, onProcesso, onDigitalizadas,
-  onAplicar, onFechar }) {
+  onCodigo, onAplicar, onFechar }) {
   const cor = r.tipo === "adm" ? COR_ADM : COR_TEC;
   const soCodigo = r.tipo === "codigo"; // só copia o código de glosa técnica: nada de valor
   const completo = r.modo === "completo";
@@ -1132,6 +1132,10 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
   const marcados = r.itens.filter((i) => i.marcado && (soCodigo || valorRepeticao(r, i.linha) > 0));
   const total = marcados.reduce((s, i) => s + valorRepeticao(r, i.linha), 0);
   const o = r.origem;
+  // linha com dois códigos: até o auditor escolher qual é o do item, não há busca nem valores
+  const doisCodigos = !!(o && o.codigos.length > 1);
+  const codigoItem = doisCodigos ? o.codigos.find((c) => c.digitos === r.codigoItem) : null;
+  const ok = o && (!doisCodigos || codigoItem);
   let pgAnterior = null;
   return (
     <div className="absolute bottom-3 right-3 z-20 w-80 max-w-[calc(100%-1.5rem)] max-h-[calc(100%-1.5rem)] flex flex-col
@@ -1150,7 +1154,7 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
       <div className="px-3 py-2 flex flex-col gap-2 border-b border-[var(--border)]">
         {o ? (
           <div className="text-xs leading-snug">
-            <span className="font-mono">{o.codigoLido}</span>{" "}
+            <span className="font-mono">{codigoItem ? codigoItem.lido : o.codigoLido}</span>{" "}
             <span className="text-[var(--muted)]">{o.descricao}</span>
             <div className="text-[var(--muted)]">Vl unitário R$ {moeda(o.unit)} · glosado na pág. {r.pg}</div>
           </div>
@@ -1158,10 +1162,27 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
           <div className="text-xs text-[var(--muted)]">Lendo a linha glosada…</div>
         ) : null}
         {r.err && <div className="text-xs text-[var(--muted)]">{r.err}</div>}
-        {o && soCodigo && (
+        {doisCodigos && (
+          <div className="flex flex-col gap-1">
+            {!codigoItem && (
+              <div className="text-xs">Esta linha tem dois códigos — qual identifica o item?</div>
+            )}
+            <div className="flex rounded-md border border-[var(--border)] overflow-hidden text-xs">
+              {o.codigos.map((c) => (
+                <button key={c.lido} onClick={() => onCodigo(c.digitos)}
+                  className={`flex-1 px-2 py-1 font-mono ${c === codigoItem
+                    ? "bg-[var(--accent)] text-[var(--accent-contrast)] font-semibold"
+                    : "text-[var(--muted)] hover:bg-[var(--hover)]"}`}>
+                  {c.lido}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {ok && soCodigo && (
           <div className="text-xs text-[var(--muted)]">Só as linhas que já têm corte. O valor não muda.</div>
         )}
-        {o && !soCodigo && (
+        {ok && !soCodigo && (
           <div className="flex rounded-md border border-[var(--border)] overflow-hidden text-xs">
             {[["completo", "Item completo"], ["qtde", "Mesma qtde"]].map(([m, rot]) => (
               <button key={m} onClick={() => onCampo("modo", m)}
@@ -1173,7 +1194,7 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
             ))}
           </div>
         )}
-        {o && !soCodigo && (
+        {ok && !soCodigo && (
           <label className="flex items-center gap-2">
             <span className="flex-1 text-xs text-[var(--muted)]">
               {completo ? "Valor da glosa de 1 unidade" : "Qtde glosada em cada item"}
@@ -1191,7 +1212,7 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
             )}
           </label>
         )}
-        {o && r.tipo === "tec" && (
+        {ok && r.tipo === "tec" && (
           <label className="flex items-center gap-2"
             title="Escrito em vermelho ao lado de cada corte, inclusive do primeiro se ele ainda não tiver">
             <span className="flex-1 text-xs text-[var(--muted)]">Código da glosa (opcional)</span>
@@ -1229,7 +1250,7 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
       </div>
 
       <div>
-        {o && !r.lendo && !r.itens.length && (
+        {ok && !r.lendo && !r.itens.length && (
           <div className="px-3 py-3 text-xs text-[var(--muted)]">
             {soCodigo ? "Nenhuma outra linha cortada deste item" : "Nenhuma outra ocorrência"}{" "}
             {r.escopo === "pagina" ? "nesta página" : "no processo"}.
@@ -1249,7 +1270,9 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
               )}
               <label className="flex items-center gap-2 px-3 py-1 text-xs hover:bg-[var(--hover)] cursor-pointer">
                 <input type="checkbox" checked={i.marcado} onChange={() => onMarcar(i.id)} />
-                <span className="flex-1 truncate" title={i.linha.descricao}>{i.linha.descricao || i.linha.codigoLido}</span>
+                <span className="flex-1 truncate" title={i.linha.descricao}>
+                  {i.linha.descricao || (codigoItem && i.linha.codigos.find((c) => c.digitos === codigoItem.digitos)?.lido)
+                    || i.linha.codigoLido}</span>
                 <span className="text-[var(--muted)] shrink-0" title="Quantidade cobrada nesta linha">
                   {i.linha.qtd > 0 ? `qtd ${moeda(i.linha.qtd).replace(/,00$/, "")}` : ""}
                 </span>
@@ -1273,7 +1296,7 @@ function PainelRepeticoes({ r, pagina, onCampo, onMarcar, onTodos, onIr, onParar
             <button onClick={() => onTodos(false)} className="hover:text-[var(--text)]">nenhum</button>
           </div>
         )}
-        {r.escopo === "pagina" && o && !r.lendo && (
+        {r.escopo === "pagina" && ok && !r.lendo && (
           <button onClick={onProcesso}
             className="w-full px-2 py-1.5 rounded-md text-xs font-semibold
               border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)]">
@@ -2586,6 +2609,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       origem: null, itens: [], err: "", qtd: antes ? antes.qtd : "",
       modo: (antes && antes.modo) || r.modo || "qtde", valorUnid: antes ? antes.valorUnid : "",
       codigoGlosa: antes ? antes.codigoGlosa : undefined,
+      codigoItem: r.codigoItem || (antes && antes.codigoItem) || "",
       lendo: { feitas: 0, total: 0, origem: true },
     });
     // uma busca parada ou substituída não escreve mais no painel
@@ -2603,6 +2627,15 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           err: "Não consegui ler o código e o valor unitário desta linha — sem eles não dá para achar os iguais." }));
         return;
       }
+      // Linha com dois códigos (guia/lote e o do item): o auditor escolhe qual identifica o item.
+      // Sem escolha não procura nada — o lote é igual em todas as linhas e pegaria a tabela toda
+      const codigoItem = r.codigoItem || (antes && antes.codigoItem) || "";
+      const escolhido = origem.codigos.find((c) => c.digitos === codigoItem);
+      if (origem.codigos.length > 1 && !escolhido) {
+        atualiza((x) => ({ ...x, origem, codigoItem: "", lendo: null }));
+        return;
+      }
+      const ref = escolhido ? { ...origem, codigos: [escolhido] } : origem;
       // qtde sugerida: a do corte técnico; na administrativa, quantas unidades o "G" representa
       let sug = 1;
       if (r.tipo === "tec") sug = r.ann.glosaQtd || 1;
@@ -2620,7 +2653,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         const novos = [];
         for (const l of linhas) {
           if (pg === r.pg && Math.abs(l.cy - origem.cy) < 1) continue; // a própria glosada
-          if (!mesmoItem(l, origem)) continue;
+          if (!mesmoItem(ref, l)) continue;
           // o código só vai onde já há corte; "já tem" = já tem código
           if (r.tipo === "codigo" && !jaGlosada(doc, pg, l, "tec")) continue;
           const ja = r.tipo === "codigo" ? temCodigo(doc, pg, l) : jaGlosada(doc, pg, l, r.tipo);
@@ -4450,6 +4483,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
             onParar={pararBusca}
             onProcesso={() => buscarRepeticoes(repeticoes, "processo", { antes: repeticoes })}
             onDigitalizadas={() => buscarRepeticoes(repeticoes, repeticoes.escopo, { comOcr: true, antes: repeticoes })}
+            onCodigo={(d) => buscarRepeticoes({ ...repeticoes, codigoItem: d }, repeticoes.escopo,
+              { antes: { ...repeticoes, itens: [] } })}
             onAplicar={aplicarRepeticoes}
             onFechar={fecharRepeticoes}
           />
