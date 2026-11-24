@@ -1,14 +1,17 @@
 // Copia os arquivos do OCR (tesseract.js) de node_modules para public/ocr/, para o site servir
 // tudo sozinho em vez de baixar do cdn.jsdelivr.net na primeira leitura. Numa rede que bloqueia
 // ou derruba o CDN, o OCR não carregava e a glosa técnica caía em "preencha à mão".
-// Roda no predev/prebuild (package.json); public/ocr/ é gerado e fica fora do git.
+// Roda dentro do próprio Vite (plugin em vite.config.js), no dev e no build: o Vercel chama
+// `vite build` direto e pula o prebuild do npm. public/ocr/ é gerado e fica fora do git.
 import { copyFileSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const raiz = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+export function copiarOcr() {
 const destino = join(raiz, "public", "ocr");
 mkdirSync(destino, { recursive: true });
 
@@ -27,3 +30,7 @@ const arquivos = [
 ];
 for (const [de, nome] of arquivos) copyFileSync(de, join(destino, nome));
 console.log(`OCR: ${arquivos.length} arquivos em public/ocr/`);
+}
+
+// também dá para rodar à mão: node scripts/copiar-ocr.mjs
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) copiarOcr();

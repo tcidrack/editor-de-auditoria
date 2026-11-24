@@ -4,9 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "predev": "node scripts/copiar-ocr.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/copiar-ocr.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
