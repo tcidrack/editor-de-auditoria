@@ -125,3 +125,50 @@ export const juntarPdfs = async (partes) => {
     keywordsOriginais,
   };
 };
+
+// O inverso: parte um PDF em dois a partir de uma página (1-based) — o processo que veio com
+// duas contas. A glosa herdada é dividida pela página e a da 2ª parte volta a contar do 1;
+// auditores e total da conta valem para as duas. Mesmo contrato do juntarPdfs para `herdado`
+// e `keywordsOriginais` (undefined = leia do arquivo).
+//
+// Devolve [{ bytes, paginas, offset, herdado, keywordsOriginais }], uma entrada por parte;
+// offset é quantas páginas do original vieram antes dela.
+export const separarPdf = async ({ bytes, herdado, keywordsOriginais }, aPartirDe) => {
+  const opts = { ignoreEncryption: true, updateMetadata: false };
+  const doc = await PDFDocument.load(bytes, opts);
+  const total = doc.getPageCount();
+  const corte = Math.floor(aPartirDe);
+  if (!(corte >= 2 && corte <= total))
+    throw new Error(`a página para separar tem que estar entre 2 e ${total}.`);
+
+  const doArquivo = lerGlosasDoPdf(doc.getKeywords());
+  const her = herdado !== undefined ? herdado : doArquivo.herdado;
+  const kw = keywordsOriginais !== undefined ? keywordsOriginais : doArquivo.keywordsOriginais;
+
+  const faixas = [[0, corte - 1], [corte - 1, total]]; // [início, fim) em índice 0-based
+  const partes = [];
+  for (const [ini, fim] of faixas) {
+    const out = await PDFDocument.create();
+    const idx = Array.from({ length: fim - ini }, (_, i) => ini + i);
+    for (const p of await out.copyPages(doc, idx)) out.addPage(p);
+
+    let payload = null;
+    if (her) {
+      const dentro = (x) => x.p > ini && x.p <= fim;
+      payload = {
+        ...her,
+        tec: (her.tec || []).filter(dentro).map((t) => ({ ...t, p: t.p - ini })),
+        adm: (her.adm || []).filter(dentro).map((a) => ({ ...a, p: a.p - ini })),
+      };
+    }
+    for (const k of ["Title", "Author", "Subject", "Creator"]) {
+      const v = doc[`get${k}`](); if (v) out[`set${k}`](v);
+    }
+    out.setProducer("Editor de Auditoria — Maida (separado)");
+    if (payload) out.setKeywords([kw, PREFIXO_GLOSAS + JSON.stringify(payload)].filter(Boolean));
+    else if (kw) out.setKeywords([kw]);
+
+    partes.push({ bytes: await out.save(), paginas: fim - ini, offset: ini, herdado: payload, keywordsOriginais: kw || "" });
+  }
+  return partes;
+};

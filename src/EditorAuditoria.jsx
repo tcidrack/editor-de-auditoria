@@ -5,7 +5,7 @@ import {
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
   Keyboard, LogOut, KeyRound, Settings, Square, RotateCcw, RotateCw,
-  ChevronUp, ChevronDown, Combine, GripVertical, Rows3,
+  ChevronUp, ChevronDown, Combine, GripVertical, Rows3, Scissors,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -16,7 +16,7 @@ import { PDFDocument, rgb, StandardFonts, LineCapStyle, degrees,
   pushGraphicsState, popGraphicsState, concatTransformationMatrix } from "pdf-lib";
 import JSZip from "jszip";
 import * as rascunho from "./rascunho";
-import { PREFIXO_GLOSAS, lerGlosasDoPdf, juntarPdfs, deslocarPaginas, somaHerdada } from "./juntar";
+import { PREFIXO_GLOSAS, lerGlosasDoPdf, juntarPdfs, separarPdf, deslocarPaginas, somaHerdada } from "./juntar";
 import { useArrastarLista } from "./arrastar";
 import { agruparLinhas, palavrasDoTexto, ehItem, mesmoItem, linhaEm } from "./repeticoes";
 import { PAPEIS, usaCarimbo, usaGlosaColuna, lerCarimbo, salvarCarimbo, apagarCarimbo,
@@ -1640,6 +1640,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const [stampsOpen, setStampsOpen] = useState(false);
   const filaRef = useRef(null); // container que rola da fila — a rolagem automática do arrasto
   const [juntarOpen, setJuntarOpen] = useState(false); // janela de juntar partes do processo
+  const [separarEm, setSepararEm] = useState(null); // janela de separar: o texto do campo, ou null fechada
   const [selecionados, setSelecionados] = useState(() => new Set()); // ids marcados na fila
   const [ajudaOpen, setAjudaOpen] = useState(false); // tela de atalhos (tecla ?)
   const [senhaOpen, setSenhaOpen] = useState(false); // trocar a própria senha
@@ -3511,6 +3512,79 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     }
     finally { setSaving(false); }
   };
+  // ---- separar um processo em dois (o inverso do juntar) ----
+  // O processo que veio com duas contas: o documento aberto vira dois na fila, no lugar dele,
+  // cada um com as suas marcações, giros e glosa herdada já renumerados. Para "excluir o final",
+  // o auditor separa e apaga a parte que não quer — nada some sem ele mandar.
+  const separarAtual = async (aPartirDe) => {
+    const d = getActive(); if (!d || !d.numPages) return;
+    const corte = Math.floor(aPartirDe);
+    if (!(corte >= 2 && corte <= d.numPages)) return;
+    setSaving(true);
+    try {
+      // mesma regra do juntar: o herdado de memória só manda depois de lido do arquivo
+      const partes = await separarPdf({
+        bytes: d.bytes,
+        herdado: d.metaLida ? d.herdado : undefined,
+        keywordsOriginais: d.metaLida ? (d.keywordsOriginais || "") : undefined,
+      }, corte);
+
+      // o sufixo entra ANTES da máscara " - AUDITADO (…)": depois dela, o nomeAuditado não
+      // reconheceria a máscara e o próximo salvamento empilharia outra
+      const base = d.name.replace(/\.pdf$/i, "");
+      const m = MASCARA.exec(base);
+      const nomeParte = (ini, fim) => {
+        const suf = ` (pág. ${ini}-${fim})`;
+        return (m ? base.slice(0, m.index) + suf + base.slice(m.index) : base + suf) + ".pdf";
+      };
+      const novos = partes.map((pt) => {
+        const ini = pt.offset + 1, fim = pt.offset + pt.paginas;
+        const daParte = (mapa) => {
+          const out = {};
+          for (const [pg, v] of Object.entries(mapa || {})) if (+pg >= ini && +pg <= fim) out[pg] = v;
+          return deslocarPaginas(out, -pt.offset);
+        };
+        const u8 = pt.bytes; // pdf-lib devolve Uint8Array; o editor guarda ArrayBuffer (ver juntar)
+        const bytes = u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength ? u8.buffer : u8.slice().buffer;
+        return {
+          id: ++seq.current, name: nomeParte(ini, fim), bytes, pdfDoc: null,
+          numPages: pt.paginas, page: 1,
+          annotations: daParte(d.annotations), rotacoes: daParte(d.rotacoes), saved: false,
+          totalConta: d.totalConta || "",
+          herdado: pt.herdado, keywordsOriginais: pt.keywordsOriginais,
+          key: rascunho.novaChave(), ordem: d.ordem,
+          metaLida: true, // as Keywords certas são as que acabamos de montar (ver juntar)
+          semBinario: false, binarioGravado: false,
+        };
+      });
+
+      const antes = store.current.docs;
+      const pos = antes.findIndex((x) => x.id === d.id);
+      store.current.docs = [...antes.slice(0, pos), ...novos, ...antes.slice(pos + 1)];
+      if (d.key) rascunho.apagarDoc(d.key);
+      soltarDoc(d);
+      desmarcar([d.id]);
+      // renumera `ordem` da fila inteira (é ela que refaz a ordem depois de um F5), como o
+      // reordenarFila — mas cada parte nova grava o rascunho uma vez só, logo abaixo
+      store.current.docs.forEach((x, i) => {
+        if (x.ordem === i + 1) return;
+        x.ordem = i + 1;
+        if (!novos.includes(x) && x.key && !x.saved) salvarRascunho(x, x.page || 1);
+      });
+      ordemSeq.current = Math.max(ordemSeq.current, store.current.docs.length);
+      for (const n of novos) salvarRascunho(n, 1);
+
+      setSepararEm(null);
+      redo.current = []; // as entradas apontam para { docId, page } que não existem mais
+      setActiveId(novos[0].id); setPage(1);
+      tick();
+      setGiroRev((n) => n + 1); // o efeito de render não depende de rev (ver juntar)
+    } catch (e) {
+      setSepararEm(null);
+      showAlert("Erro ao separar", e.message);
+    }
+    finally { setSaving(false); }
+  };
   // Uma coluna de glosas é um ato só: sem isto, desfazer 30 linhas seria 30 Ctrl+Z. As caixas
   // do mesmo arrasto compartilham `grupo` e saem juntas (a borracha continua indo de uma em
   // uma — é o que serve para corrigir uma linha isolada).
@@ -3743,6 +3817,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     if (menuOpen) { setMenuOpen(false); return; }
     if (senhaOpen) { setSenhaOpen(false); return; }
     if (juntarOpen) { if (!saving) setJuntarOpen(false); return; } // no meio da junção, não
+    if (separarEm != null) { if (!saving) setSepararEm(null); return; }
     if (ajudaOpen) { setAjudaOpen(false); return; }
     if (dialog) { if (!dialog.semBackdrop) setDialog(null); return; }
     if (stampsOpen) { setStampsOpen(false); return; }
@@ -3763,7 +3838,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
     goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
     escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta, bloqueado,
-    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec || colGlosa || juntarOpen),
+    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec || colGlosa || juntarOpen || separarEm != null),
   };
   useEffect(() => {
     const h = (e) => {
@@ -4602,6 +4677,49 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           onJuntar={juntarSelecionados} />
       )}
 
+      {/* separar o processo em dois */}
+      {separarEm != null && active && (() => {
+        const n = parseInt(separarEm, 10), total = active.numPages;
+        const ok = n >= 2 && n <= total;
+        const fechar = () => { if (!saving) setSepararEm(null); };
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/50" onClick={fechar} />
+            <div className="relative bg-[var(--surface)] rounded-xl shadow-2xl p-4 w-full max-w-sm border border-[var(--border)]">
+              <div className="flex items-center justify-between mb-3">
+                <b className="text-[var(--text)]">Separar PDF</b>
+                <button onClick={fechar} title="Fechar"
+                  className="w-8 h-8 flex items-center justify-center rounded-md text-[var(--muted)] hover:bg-[var(--hover)]">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-[var(--text)]">
+                Nova parte começa na página
+                <input type="text" inputMode="numeric" autoFocus value={separarEm} disabled={saving}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setSepararEm(e.target.value.replace(/[^0-9]/g, ""))}
+                  onKeyDown={(e) => { if (e.key === "Enter" && ok && !saving) { e.preventDefault(); separarAtual(n); } }}
+                  className="w-16 px-1 py-0.5 text-center rounded-md border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] focus:outline-none focus:border-[var(--accent)]" />
+                <span className="text-[var(--muted)]">de {total}</span>
+              </label>
+              <p className="text-xs text-[var(--muted)] mt-3 leading-relaxed">
+                {ok
+                  ? <>Vira dois documentos na fila: <b>páginas 1–{n - 1}</b> e <b>páginas {n}–{total}</b>, cada um com as suas marcações e glosas. Para excluir uma parte, apague-a na fila depois.</>
+                  : <>Digite uma página entre 2 e {total}.</>}
+              </p>
+              <div className="flex justify-end gap-2 mt-4">
+                <button onClick={fechar} disabled={saving}
+                  className="px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40">Cancelar</button>
+                <button onClick={() => separarAtual(n)} disabled={!ok || saving}
+                  className="px-3 py-1.5 rounded-lg text-sm font-semibold bg-[var(--accent)] text-black hover:opacity-90 disabled:opacity-40 flex items-center gap-1.5">
+                  <Scissors className="w-4 h-4" />{saving ? "Separando…" : "Separar"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* painel de carimbos */}
       {stampsOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -4692,6 +4810,10 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
           <button onClick={() => girarPagina(90)} disabled={!active || !active.numPages}
             title="Girar esta página para a direita"
             className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><RotateCw className="w-4 h-4" /></button>
+          <button onClick={() => setSepararEm(String(Math.max(2, page)))}
+            disabled={!active || !(active.numPages > 1) || saving}
+            title="Separar este PDF em dois (processo com duas contas)"
+            className="px-3 py-1.5 md:px-2.5 md:py-1 rounded-md border border-[var(--border)] text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"><Scissors className="w-4 h-4" /></button>
         </div>
         <div className="flex-1 hidden md:block" />
         <div className="flex items-center gap-1.5">
