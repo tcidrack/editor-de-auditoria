@@ -4,12 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/copiar-ocr.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/copiar-ocr.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.0",
+    "@tesseract.js-data/por": "^1.0.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.469.0",
     "pdf-lib": "^1.17.1",

@@ -7,3 +7,4 @@ dist-ssr
 npm-debug.log*
 *.log
 src/carimbos
+public/ocr

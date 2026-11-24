@@ -2231,16 +2231,27 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   // ---- leitura de código (OCR da área selecionada) ----
   // o tesseract.js é carregado sob demanda (import dinâmico) p/ não pesar o bundle inicial;
   // o worker fica em cache para as leituras seguintes saírem na hora.
-  // OBS: o motor roda 100% no navegador (nenhum dado do PDF sai daqui), mas o wasm e o
-  // dicionário vêm do CDN da própria lib na 1ª leitura. Para auto-hospedar, basta copiar os
-  // arquivos p/ public/ e passar workerPath/corePath/langPath abaixo.
+  // O motor roda 100% no navegador (nenhum dado do PDF sai daqui), e o worker, o wasm e o
+  // dicionário saem do próprio site (public/ocr/, copiados por scripts/copiar-ocr.mjs).
+  // Antes vinham do cdn.jsdelivr.net, e na rede que bloqueava o CDN a glosa técnica não lia.
+  // URLs absolutas: a lib roda o worker a partir de um blob:, onde "/ocr" não resolveria.
   const ocrWorker = useRef(null); // Promise<worker> — cachear a promise evita 2 workers
   const getOcrWorker = () => {
-    if (!ocrWorker.current)
-      ocrWorker.current = (async () => {
+    if (!ocrWorker.current) {
+      const p = (async () => {
         const { createWorker } = await import("tesseract.js");
-        return createWorker("por");
+        const ocr = new URL(`${import.meta.env.BASE_URL}ocr/`, window.location.href).href;
+        return createWorker("por", 1, {
+          workerPath: ocr + "worker.min.js", corePath: ocr, langPath: ocr,
+        });
       })();
+      // falhou? esquece a promessa: senão toda leitura seguinte falharia até um F5
+      p.catch((e) => {
+        console.error("OCR: falha ao carregar o leitor", e);
+        if (ocrWorker.current === p) ocrWorker.current = null;
+      });
+      ocrWorker.current = p;
+    }
     return ocrWorker.current;
   };
   useEffect(() => () => {
@@ -2362,7 +2373,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       }
       const ok = await copiar(saida);
       setOcr((o) => (o ? { ...o, loading: false, text: saida, copiado: ok } : o));
-    } catch {
+    } catch (e) {
+      console.error("OCR: copiar código", e);
       setOcr((o) => (o ? { ...o, loading: false, err: "Falha ao ler a área. Tente de novo." } : o));
     }
   };
@@ -2389,7 +2401,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         qtd: sob ? sob.text : "1",
         unit: unit ? unit.text : "",
       } : g));
-    } catch {
+    } catch (e) {
+      console.error("OCR: glosa técnica", e);
       setGlosaTec((g) => (g && g.ann === ann
         ? { ...g, loading: false, qtd: "1", unit: "", err: "Não consegui ler a linha — preencha à mão." }
         : g));
@@ -2464,7 +2477,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       const tam = passo > 0 ? Math.max(6, Math.min(14, Math.round(passo * 0.8))) : tamanhoAtual;
       setColGlosa((g) => (g && g.loading
         ? { ...g, loading: false, linhas, qtd: String(linhas.length), tamanho: String(tam) } : g));
-    } catch {
+    } catch (e) {
+      console.error("OCR: glosa em coluna", e);
       semLeitura("Falha ao ler a área — informe quantas linhas são.");
     }
   };
@@ -2701,7 +2715,8 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
         feitas++;
       }
       atualiza((x) => ({ ...x, lendo: null }));
-    } catch {
+    } catch (e) {
+      console.error("OCR: itens repetidos", e);
       atualiza((x) => ({ ...x, lendo: null, err: "Falha ao ler as páginas. Tente de novo." }));
     }
   };
