@@ -1829,6 +1829,11 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   }, [ready]);
 
   // ---- render da página ----
+  // O render em andamento, para ser cancelado quando outra página/zoom/giro for pedido.
+  // Sem isso, um clique em › durante um render lento punha dois render() no mesmo canvas:
+  // o novo falhava e o antigo terminava de pintar a página velha — o contador andava e a
+  // tela não, e o clique seguinte parecia "pular" uma página.
+  const renderTask = useRef(null);
   useEffect(() => {
     if (!ready || !activeId) return;
     let cancelled = false;
@@ -1874,9 +1879,23 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       const vp = pageObj.getViewport({ scale, rotation: rotacao });
       const b = baseRef.current, o = overlayRef.current;
       if (!b || !o) return;
+      // o canvas só pode ter um render() por vez: espera o anterior soltar antes de mexer nele
+      const anterior = renderTask.current;
+      if (anterior) { anterior.cancel(); try { await anterior.promise; } catch { /* cancelado */ } }
+      if (cancelled) return;
       b.width = o.width = Math.floor(vp.width);
       b.height = o.height = Math.floor(vp.height);
-      await pageObj.render({ canvasContext: b.getContext("2d"), viewport: vp }).promise;
+      const t = pageObj.render({ canvasContext: b.getContext("2d"), viewport: vp });
+      renderTask.current = t;
+      try {
+        await t.promise;
+      } catch (e) {
+        if (e && e.name === "RenderingCancelledException") return;
+        throw e;
+      } finally {
+        if (renderTask.current === t) renderTask.current = null;
+      }
+      if (cancelled) return;
       drawOverlay();
       // centraliza no ponto do zoom (duplo clique/toque ou pinça)
       if (focal.current && mainRef.current) {
@@ -1894,7 +1913,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
       // tela, continua subindo como antes.
       if (!cancelled && !alvo.solto) throw e;
     });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (renderTask.current) renderTask.current.cancel(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, activeId, page, scale, giroRev]);
 
