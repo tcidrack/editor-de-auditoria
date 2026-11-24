@@ -76,8 +76,13 @@ export const interpretarLinha = (l, cab = null) => {
   const perto = (x) => nums.reduce((m, t) => (Math.abs(meioX(t) - x) < Math.abs(meioX(m) - x) ? t : m));
   if (cab && !cab.temUnit && nums.length >= 2) {
     // tabela sem valor unitário ("Qtde | Vl. Total | %"): cada número na coluna mais perto
-    qtd = perto(cab.xQtd); total = perto(cab.xTotal);
-    if (qtd === total) qtd = total = null;
+    // A Qtde pode vir inteira ("| 1 |", sem vírgula) e ao lado de outra coluna de valor
+    // (Patologia: "Qt | C.H. | Filme Radiologico | Valor C.H. | Valor Total") — só com os
+    // números de vírgula, o Valor C.H. virava a Qtde e o unitário saía 1,00
+    total = perto(cab.xTotal);
+    const qs = tk.filter((t, i) => i > iCod && t !== total && (RE_NUM.test(t.limpo) || /^\d{1,4}$/.test(t.limpo)));
+    qtd = qs.length ? qs.reduce((m, t) => (Math.abs(meioX(t) - cab.xQtd) < Math.abs(meioX(m) - cab.xQtd) ? t : m)) : null;
+    if (!qtd) total = null;
   } else if (nums.length >= 2) {
     [unit, total] = nums.slice(-2);
     const iUnit = tk.indexOf(unit), vU = numBR(unit.limpo), vT = numBR(total.limpo);

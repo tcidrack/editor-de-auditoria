@@ -2391,6 +2391,30 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     const primeira = !ocrWorker.current;
     setGlosaTec({ ann, ...faixa, loading: true, primeira, qtd: "", unit: "", err: "" });
     try {
+      // 1º a linha INTEIRA, com o mesmo leitor dos itens repetidos: a Qtde sai da conta
+      // qtd × unitário = total. A faixa estreita abaixo não alcança o Vl unitário quando há
+      // colunas vazias no meio (Hemoterapia: "Qt | C.H. | Filme Radiológico | Valor C.H.")
+      const doc = getActive();
+      let item = null;
+      if (doc && doc.pdfDoc) {
+        // página com camada de texto: instantâneo e exato
+        const doTexto = await linhasDaPagina(doc, page, { soTexto: true });
+        if (doTexto) item = linhaEm(doTexto, cy);
+        // digitalizada: OCR de uma faixa da largura toda da página, na altura do traço
+        if (!item) {
+          const largura = baseRef.current ? baseRef.current.width / scale : 1000;
+          const linha = await lerRegiaoTexto({ x: 0, y: Math.max(0, cy - 7), w: largura, h: 14 }, { escala: 3 });
+          item = linhaEm(agruparLinhas((linha && linha.palavras) || []), cy);
+        }
+      }
+      if (item && item.unit > 0 && item.qtd > 0) {
+        const br = (n, min) => n.toLocaleString("pt-BR", { minimumFractionDigits: min, maximumFractionDigits: 5 });
+        setGlosaTec((g) => (g && g.ann === ann ? {
+          ...g, loading: false, qtd: br(item.qtd, 0), unit: br(item.unit, 2),
+        } : g));
+        return;
+      }
+      // não achou a linha como item de tabela: leitura antiga, só ao redor do traço
       const lido = await lerRegiaoTexto(faixa);
       const palavras = (lido && lido.palavras) || [];
       // qtde: inteiro sob o traço | unitário: 1º valor monetário à direita do fim do traço
