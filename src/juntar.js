@@ -126,40 +126,47 @@ export const juntarPdfs = async (partes) => {
   };
 };
 
-// O inverso: parte um PDF em dois a partir de uma página (1-based) — o processo que veio com
-// duas contas. A glosa herdada é dividida pela página e a da 2ª parte volta a contar do 1;
-// auditores e total da conta valem para as duas. Mesmo contrato do juntarPdfs para `herdado`
-// e `keywordsOriginais` (undefined = leia do arquivo).
+// O inverso: tira um trecho do PDF (da página `de` até `ate`, 1-based) — o processo que veio
+// com duas contas, a outra no fim ou no meio. Saem duas partes:
+//   [0] o RESTANTE: as páginas fora do trecho, emendadas na ordem original
+//   [1] o TRECHO: as páginas de..ate
+// A glosa herdada segue a sua página para a parte certa, renumerada; auditores e total da conta
+// valem para as duas. Mesmo contrato do juntarPdfs para `herdado` e `keywordsOriginais`
+// (undefined = leia do arquivo).
 //
-// Devolve [{ bytes, paginas, offset, herdado, keywordsOriginais }], uma entrada por parte;
-// offset é quantas páginas do original vieram antes dela.
-export const separarPdf = async ({ bytes, herdado, keywordsOriginais }, aPartirDe) => {
+// Devolve [{ bytes, paginas, paginasOriginais, herdado, keywordsOriginais }];
+// paginasOriginais[i] é a página do original (1-based) que virou a página i+1 da parte — é com
+// ela que o chamador remapeia o que for dele (marcações, giros).
+export const separarPdf = async ({ bytes, herdado, keywordsOriginais }, de, ate) => {
   const opts = { ignoreEncryption: true, updateMetadata: false };
   const doc = await PDFDocument.load(bytes, opts);
   const total = doc.getPageCount();
-  const corte = Math.floor(aPartirDe);
-  if (!(corte >= 2 && corte <= total))
-    throw new Error(`a página para separar tem que estar entre 2 e ${total}.`);
+  const ini = Math.floor(de), fim = Math.floor(ate);
+  if (!(ini >= 1 && fim <= total && ini <= fim))
+    throw new Error(`o trecho tem que estar entre as páginas 1 e ${total}, com o início antes do fim.`);
+  if (ini === 1 && fim === total)
+    throw new Error("o trecho não pode ser o PDF inteiro — não sobraria nada na outra parte.");
 
   const doArquivo = lerGlosasDoPdf(doc.getKeywords());
   const her = herdado !== undefined ? herdado : doArquivo.herdado;
   const kw = keywordsOriginais !== undefined ? keywordsOriginais : doArquivo.keywordsOriginais;
 
-  const faixas = [[0, corte - 1], [corte - 1, total]]; // [início, fim) em índice 0-based
+  const todas = Array.from({ length: total }, (_, i) => i + 1);
+  const listas = [
+    todas.filter((p) => p < ini || p > fim), // restante
+    todas.filter((p) => p >= ini && p <= fim), // trecho
+  ];
   const partes = [];
-  for (const [ini, fim] of faixas) {
+  for (const paginasOriginais of listas) {
     const out = await PDFDocument.create();
-    const idx = Array.from({ length: fim - ini }, (_, i) => ini + i);
-    for (const p of await out.copyPages(doc, idx)) out.addPage(p);
+    for (const p of await out.copyPages(doc, paginasOriginais.map((p) => p - 1))) out.addPage(p);
 
+    // página original → página nova nesta parte
+    const nova = new Map(paginasOriginais.map((p, i) => [p, i + 1]));
     let payload = null;
     if (her) {
-      const dentro = (x) => x.p > ini && x.p <= fim;
-      payload = {
-        ...her,
-        tec: (her.tec || []).filter(dentro).map((t) => ({ ...t, p: t.p - ini })),
-        adm: (her.adm || []).filter(dentro).map((a) => ({ ...a, p: a.p - ini })),
-      };
+      const mover = (lista) => (lista || []).filter((x) => nova.has(x.p)).map((x) => ({ ...x, p: nova.get(x.p) }));
+      payload = { ...her, tec: mover(her.tec), adm: mover(her.adm) };
     }
     for (const k of ["Title", "Author", "Subject", "Creator"]) {
       const v = doc[`get${k}`](); if (v) out[`set${k}`](v);
@@ -168,7 +175,10 @@ export const separarPdf = async ({ bytes, herdado, keywordsOriginais }, aPartirD
     if (payload) out.setKeywords([kw, PREFIXO_GLOSAS + JSON.stringify(payload)].filter(Boolean));
     else if (kw) out.setKeywords([kw]);
 
-    partes.push({ bytes: await out.save(), paginas: fim - ini, offset: ini, herdado: payload, keywordsOriginais: kw || "" });
+    partes.push({
+      bytes: await out.save(), paginas: paginasOriginais.length, paginasOriginais,
+      herdado: payload, keywordsOriginais: kw || "",
+    });
   }
   return partes;
 };
