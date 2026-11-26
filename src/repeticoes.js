@@ -70,7 +70,10 @@ export const interpretarLinha = (l, cab = null) => {
   const iCod = tk.findIndex(ehCod);
   // há conta com dois códigos na linha (guia/lote no começo, o do item depois) — guarda todos,
   // o auditor escolhe qual identifica o item
-  const codigos = tk.filter(ehCod).map((t) => ({ digitos: t.limpo.replace(/\D/g, ""), lido: t.limpo }));
+  // Código TUSS no começo ("1.01.04.01-1") já identifica o item sozinho: na tabela de honorários
+  // vêm depois o CRM e o CPF/CNPJ do médico, que têm cara de código mas não são do item
+  const TUSS = /^\d\.\d{2}\.\d{2}\.\d{2}-\d$/;
+  const codigos = (iCod >= 0 && TUSS.test(tk[iCod].limpo) ? [tk[iCod]] : tk.filter(ehCod)).map((t) => ({ digitos: t.limpo.replace(/\D/g, ""), lido: t.limpo }));
   const nums = tk.filter((t) => RE_NUM.test(t.limpo));
   let qtd = null, unit = null, total = null;
   const perto = (x) => nums.reduce((m, t) => (Math.abs(meioX(t) - x) < Math.abs(meioX(m) - x) ? t : m));
@@ -98,6 +101,11 @@ export const interpretarLinha = (l, cab = null) => {
     else if (!qtd)
       for (let i = iUnit - 1; i > iCod; i--)
         if (/^\d{1,4}$/.test(tk[i].limpo)) { qtd = tk[i]; break; }
+  } else if (nums.length === 1 && iCod >= 0) {
+    // tabela de honorários ("…|Perc.|C.H.|Qt.| Valor Total|"): sem valor unitário, a Qtde inteira
+    // colada no total ("| 1| 224,90|"). O unitário sai de total ÷ qtde, mais abaixo
+    const iTot = tk.indexOf(nums[0]), ant = tk[iTot - 1];
+    if (iTot - 1 > iCod && /^\d{1,4}$/.test(ant.limpo) && +ant.limpo > 0) { total = nums[0]; qtd = ant; }
   }
   const vTotal = total ? numBR(total.limpo) : null;
   const vQtd0 = qtd ? numBR(qtd.limpo) : null;
