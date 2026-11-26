@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { LogIn, ShieldAlert, WifiOff, LockKeyhole } from "lucide-react";
+import { LogIn, LogOut, ShieldAlert, WifiOff, LockKeyhole, KeyRound } from "lucide-react";
 import {
-  configurado, entrar, sair, sessaoAtual, aoMudarSessao, lerPerfil,
+  configurado, entrar, sair, sessaoAtual, aoMudarSessao, lerPerfil, precisaCriarSenha, criarMinhaSenha,
 } from "./conta";
 import CampoSenha from "./CampoSenha";
 import "./EditorAuditoria.css";
@@ -37,6 +37,7 @@ const Moldura = ({ children }) => (
 //                    mandar ninguém para o login (ver o comentário de resolver)
 //   fora           — sem sessão: tela de login inteira
 //   reentrar       — a sessão caiu com o editor aberto: sobreposição por cima dele
+//   primeiroAcesso — entrou com a senha padrão dada pela gestão: cria a própria antes do editor
 //   dentro         — trabalhando
 //
 // O editor só monta em "dentro" e "reentrar" — ele lê localStorage e abre o IndexedDB já na
@@ -52,6 +53,8 @@ export default function PortaoLogin({ children }) {
   const [erro, setErro] = useState("");
   const [entrando, setEntrando] = useState(false);
   const [trocandoConta, setTrocandoConta] = useState(false); // confirmação do "outra conta"
+  const [novaSenha, setNovaSenha] = useState("");
+  const [repeteSenha, setRepeteSenha] = useState("");
   const emailRef = useRef(null);
   const senhaRef = useRef(null);
 
@@ -73,6 +76,17 @@ export default function PortaoLogin({ children }) {
       if (perfil) {
         // o e-mail vem do auth, não de perfis: o editor grava a autoria no PDF exportado
         const u = { ...perfil, email: authUser.email || "" };
+        // senha padrão da gestão: o editor só monta depois da troca. usuarioRef fica vazio de
+        // propósito — assim o próximo evento (o USER_UPDATED da troca) passa por aqui de novo
+        // e, já sem a marca, entra; e uma queda de sessão agora volta ao login, não à reentrada
+        if (precisaCriarSenha(authUser)) {
+          usuarioRef.current = null;
+          // sem limpar os campos: o refoco da aba dispara SIGNED_IN e passa por aqui de novo
+          setUsuario(u); setSemPerfil(false); setErroServidor("");
+          tentativa = 0;
+          setEstado("primeiroAcesso");
+          return;
+        }
         usuarioRef.current = u;
         setUsuario(u); setSemPerfil(false); setErroServidor("");
         tentativa = 0;
@@ -137,10 +151,22 @@ export default function PortaoLogin({ children }) {
   const enviar = async (e) => {
     e.preventDefault();
     if (entrando) return;
-    setEntrando(true); setErro("");
+    setEntrando(true); setErro(""); setNovaSenha(""); setRepeteSenha("");
     const { erro: falhou } = await entrar(email, senha);
     if (falhou) { setErro(falhou); setSenha(""); }
     setEntrando(false); // no sucesso, aoMudarSessao leva para "dentro"
+  };
+
+  const criarSenha = async (e) => {
+    e.preventDefault();
+    if (entrando) return;
+    if (novaSenha.length < 6) return setErro("A senha precisa ter pelo menos 6 caracteres.");
+    if (novaSenha !== repeteSenha) return setErro("A confirmação não bate com a senha.");
+    setEntrando(true); setErro("");
+    const { erro: falhou } = await criarMinhaSenha(novaSenha);
+    setEntrando(false);
+    if (falhou) setErro(falhou);
+    // no sucesso, o USER_UPDATED chega ao aoMudarSessao já sem a marca e leva para "dentro"
   };
 
   // desiste da sessão anterior e volta para a tela de login inteira. Descarta o que está
@@ -193,6 +219,37 @@ export default function PortaoLogin({ children }) {
 
   if (estado === "carregando")
     return <Moldura><p className="text-sm text-[var(--muted)]">Verificando o acesso…</p></Moldura>;
+
+  if (estado === "primeiroAcesso")
+    return (
+      <Moldura>
+        <form onSubmit={criarSenha}>
+          <b className="flex items-center gap-2 mb-1">
+            <KeyRound className="w-4 h-4 text-[var(--accent)]" />
+            Crie a sua senha
+          </b>
+          <p className="text-xs text-[var(--muted)] mb-3 leading-relaxed">
+            Olá, <b>{usuario && usuario.nome}</b>. Você entrou com a senha de primeiro acesso.
+            Crie agora uma senha só sua — é ela que você vai usar daqui em diante.
+          </p>
+          <CampoSenha label="Nova senha" autoComplete="new-password" value={novaSenha} className="mb-3"
+            onChange={(e) => { setNovaSenha(e.target.value); setErro(""); }} />
+          <CampoSenha label="Repita a nova senha" autoComplete="new-password" value={repeteSenha}
+            onChange={(e) => { setRepeteSenha(e.target.value); setErro(""); }} />
+          {erro && <div className="mt-2 text-xs text-red-500">{erro}</div>}
+          <button type="submit" disabled={!novaSenha || !repeteSenha || entrando}
+            className="mt-3 w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg
+              text-sm font-semibold bg-[var(--accent)] text-[var(--accent-contrast)]
+              hover:opacity-90 disabled:opacity-40">
+            <KeyRound className="w-4 h-4" />{entrando ? "Salvando…" : "Salvar e entrar"}
+          </button>
+          <button type="button" onClick={() => sair()}
+            className="mt-3 w-full flex items-center justify-center gap-1.5 text-[11px] text-[var(--muted)] hover:underline">
+            <LogOut className="w-3 h-3" />Sair
+          </button>
+        </form>
+      </Moldura>
+    );
 
   // a sessão está válida; quem não respondeu foi o servidor. Fica insistindo em vez de
   // apresentar um formulário de login que não resolveria nada.

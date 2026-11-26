@@ -112,10 +112,44 @@ export const trocarSenha = async (senhaAtual, novaSenha) => {
 // data null SEM erro, e qualquer error que chegue aqui é falha de verdade.
 export const lerPerfil = async (userId) => {
   if (!sb) return { erro: "Supabase não configurado." };
-  const { data, error } = await sb.from("perfis").select("nome, papel").eq("id", userId).maybeSingle();
+  const { data, error } = await sb.from("perfis").select("nome, papel, gestor").eq("id", userId).maybeSingle();
   if (error) return { erro: traduzir(error.message) };
   if (!data) return { semPerfil: true };
-  return { perfil: { id: userId, nome: data.nome, papel: data.papel } };
+  return { perfil: { id: userId, nome: data.nome, papel: data.papel, gestor: !!data.gestor } };
+};
+
+// ---- primeiro acesso ----
+// quem foi criado (ou teve a senha redefinida) pela gestão entra com uma senha padrão e
+// trocar_senha no user_metadata: o portão só abre o editor depois desta troca
+export const precisaCriarSenha = (authUser) =>
+  !!(authUser && authUser.user_metadata && authUser.user_metadata.trocar_senha);
+
+export const criarMinhaSenha = async (novaSenha) => {
+  if (!sb) return { erro: "Supabase não configurado." };
+  const { data, error } = await sb.auth.updateUser({ password: novaSenha, data: { trocar_senha: false } });
+  if (error) return { erro: traduzir(error.message) };
+  return { usuario: data.user };
+};
+
+// ---- gestão de auditores (só gestoras) ----
+// Criar login e trocar senha alheia exigem a service_role key, que não pode vir para o
+// navegador: quem faz é a Edge Function gestao-auditores, que também confere se quem chama
+// é gestor. Daqui sai só o pedido, com o token da sessão (o invoke manda sozinho).
+export const gestaoAuditores = async (acao, dados = {}) => {
+  if (!sb) return { erro: "Supabase não configurado." };
+  try {
+    const { data, error } = await sb.functions.invoke("gestao-auditores", { body: { acao, ...dados } });
+    if (!error) return data || {};
+    // resposta não-2xx: a função manda { erro } em português no corpo
+    let corpo = null;
+    try { corpo = error.context && (await error.context.json()); } catch { /* corpo não é JSON */ }
+    if (corpo && corpo.erro) return { erro: corpo.erro };
+    const status = error.context && error.context.status;
+    if (status === 404) return { erro: "A função gestao-auditores ainda não foi publicada no Supabase." };
+    return { erro: traduzir(error.message) };
+  } catch (e) {
+    return { erro: traduzir(e && e.message) };
+  }
 };
 
 // ---- carimbo (bucket privado, uma pasta por usuário) ----

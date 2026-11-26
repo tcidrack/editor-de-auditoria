@@ -5,7 +5,7 @@ import {
   ChevronLeft, ChevronRight, Minus, Plus, Pencil, Type, Highlighter,
   Moon, Sun, Stamp, Copy, X, Redo2, Move, Check, Eraser, ScanText, Calculator,
   Keyboard, LogOut, KeyRound, Settings, Square, RotateCcw, RotateCw,
-  ChevronUp, ChevronDown, Combine, GripVertical, Rows3, Scissors,
+  ChevronUp, ChevronDown, Combine, GripVertical, Rows3, Scissors, Users,
 } from "lucide-react";
 import "./EditorAuditoria.css";
 
@@ -22,6 +22,7 @@ import { agruparLinhas, palavrasDoTexto, ehItem, mesmoItem, linhaEm } from "./re
 import { PAPEIS, usaCarimbo, usaGlosaColuna, lerCarimbo, salvarCarimbo, apagarCarimbo,
   trocarSenha } from "./conta";
 import CampoSenha from "./CampoSenha";
+import GestaoAuditores from "./GestaoAuditores";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const LOGO_MAIDA =
@@ -1364,7 +1365,7 @@ function AjudaAtalhos({ secoes, onFechar }) {
 // ---- menu de configurações (engrenagem) ----
 // Junta o que é da conta e da aparência: sem isso, a barra da marca acumulava seis botões e
 // empurrava o título para baixo em tela estreita.
-function MenuConta({ usuario, papel, tema, aberto, onAlternar, onFechar, onSenha, onAtalhos, onTema, onSair }) {
+function MenuConta({ usuario, papel, tema, aberto, onAlternar, onFechar, onSenha, onGestao, onAtalhos, onTema, onSair }) {
   const caixa = useRef(null);
   useEffect(() => {
     if (!aberto) return;
@@ -1392,6 +1393,12 @@ function MenuConta({ usuario, papel, tema, aberto, onAlternar, onFechar, onSenha
           <button className={item} onClick={() => { onFechar(); onSenha(); }}>
             <KeyRound className="w-4 h-4 text-[var(--muted)]" />Trocar senha
           </button>
+          {/* só para quem é gestor: a Edge Function confere de novo, isto é só o atalho */}
+          {usuario.gestor && (
+            <button className={item} onClick={() => { onFechar(); onGestao(); }}>
+              <Users className="w-4 h-4 text-[var(--muted)]" />Gerenciar auditores
+            </button>
+          )}
           <button className={item} onClick={() => { onFechar(); onAtalhos(); }}>
             <Keyboard className="w-4 h-4 text-[var(--muted)]" />Atalhos do teclado
           </button>
@@ -1644,6 +1651,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const [selecionados, setSelecionados] = useState(() => new Set()); // ids marcados na fila
   const [ajudaOpen, setAjudaOpen] = useState(false); // tela de atalhos (tecla ?)
   const [senhaOpen, setSenhaOpen] = useState(false); // trocar a própria senha
+  const [gestaoOpen, setGestaoOpen] = useState(false); // gerenciar auditores (gestoras)
   const [menuOpen, setMenuOpen] = useState(false);   // engrenagem do cabeçalho
   // painel da calculadora: mora aqui (e não dentro dela) porque a tecla G também o alterna
   const [calcAberta, setCalcAberta] = useState(() => localStorage.getItem("calcAberta") !== "0");
@@ -3821,6 +3829,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
   const escapar = () => {
     if (menuOpen) { setMenuOpen(false); return; }
     if (senhaOpen) { setSenhaOpen(false); return; }
+    if (gestaoOpen) { setGestaoOpen(false); return; }
     if (juntarOpen) { if (!saving) setJuntarOpen(false); return; } // no meio da junção, não
     if (separarEm != null) { if (!saving) setSepararEm(null); return; }
     if (ajudaOpen) { setAjudaOpen(false); return; }
@@ -3843,7 +3852,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
     selectTool, setTool, setSelectedId, setColor, alternaMarca, abrirCarimbos,
     goToPage, irUltimaPagina, stepDoc, zoomPasso, setScale, saveOne, saveAll, saving,
     escapar, confirmarDialog, dialog, setAjudaOpen, alternaCalc, calcAberta, bloqueado,
-    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || glosaTec || colGlosa || juntarOpen || separarEm != null),
+    modalAberto: !!(dialog || stampsOpen || ajudaOpen || senhaOpen || gestaoOpen || glosaTec || colGlosa || juntarOpen || separarEm != null),
   };
   useEffect(() => {
     const h = (e) => {
@@ -3983,6 +3992,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
             onAlternar={() => setMenuOpen((v) => !v)}
             onFechar={() => setMenuOpen(false)}
             onSenha={() => setSenhaOpen(true)}
+            onGestao={() => setGestaoOpen(true)}
             onAtalhos={() => setAjudaOpen(true)}
             onTema={() => setTema(tema === "claro" ? "escuro" : "claro")}
             onSair={sair}
@@ -4674,6 +4684,7 @@ export default function EditorAuditoria({ usuario, onSair, bloqueado = false }) 
 
       {/* trocar a própria senha */}
       {senhaOpen && <TrocarSenha onFechar={() => setSenhaOpen(false)} />}
+      {gestaoOpen && <GestaoAuditores onFechar={() => setGestaoOpen(false)} />}
 
       {/* juntar partes de um processo dividido */}
       {juntarOpen && selecionadosNaFila.length >= 2 && (

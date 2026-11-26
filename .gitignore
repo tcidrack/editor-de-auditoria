@@ -8,3 +8,6 @@ npm-debug.log*
 *.log
 src/carimbos
 public/ocr
+
+# cache do CLI do Supabase
+supabase/.temp

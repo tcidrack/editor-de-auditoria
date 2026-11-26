@@ -21,7 +21,21 @@ alter table public.perfis enable row level security;
 drop policy if exists "le o proprio perfil" on public.perfis;
 create policy "le o proprio perfil" on public.perfis
   for select using (auth.uid() = id);
--- sem policy de insert/update de propósito: quem cadastra auditor é o admin, pelo painel
+-- sem policy de insert/update de propósito: quem cadastra auditor é a gestão, pela tela
+-- "Gerenciar auditores" (Edge Function gestao-auditores) ou pelo painel
+
+-- ---- gestoras: quem pode criar auditores pela tela ----
+-- Só a Edge Function lê isto para autorizar; no app serve apenas para mostrar o item no menu.
+-- Não há policy de update em perfis: ninguém se promove a gestor pela aplicação.
+alter table public.perfis add column if not exists gestor boolean not null default false;
+
+-- quem ainda não tiver login: crie pela tela (ou pelo painel) e rode esta linha de novo
+update public.perfis set gestor = true
+ where id in (select id from auth.users where lower(email) in (
+   'thalison.silva@maida.health',
+   'rossyneide@maida.health',
+   'raquel.feijao@maida.health'
+ ));
 
 -- ---- bucket dos carimbos (privado) ----
 -- Caminho: <user_id>/carimbo.png — a primeira pasta é o dono, e é isso que a policy confere.
@@ -82,7 +96,14 @@ create trigger on_auth_user_created_perfil
   for each row execute function public.criar_perfil_novo_usuario();
 
 -- ============================================================
--- Cadastrar um auditor:
+-- Cadastrar um auditor: pela tela "Gerenciar auditores" (Configurações, só para gestoras).
+-- Ela cria o login com uma senha de primeiro acesso, e o auditor troca na primeira entrada.
+-- A tela depende da Edge Function supabase/functions/gestao-auditores — publique-a uma vez:
+--   painel: Edge Functions > Deploy a new function > Via Editor, nome gestao-auditores,
+--           colar o index.ts
+--   ou CLI: supabase functions deploy gestao-auditores --project-ref <ref do projeto>
+--
+-- Pelo painel, sem a tela (o jeito antigo):
 --   1. Authentication > Users > Add user: e-mail @maida e senha, "Auto Confirm User"
 --      ligado. O perfil nasce junto, com papel 'administrativo' e o nome tirado do e-mail.
 --   2. Ajuste o nome e, se for técnico, promova (pelo e-mail, sem copiar UUID):
