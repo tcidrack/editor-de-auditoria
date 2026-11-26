@@ -1,3 +1,7 @@
+// @ts-nocheck
+// roda no Deno (Edge Function do Supabase): o TypeScript do VS Code não conhece Deno nem jsr:
+// e marcava o arquivo inteiro de vermelho sem haver erro de verdade.
+//
 // ---- gestao-auditores: a tela "Gerenciar auditores" das gestoras ----
 //
 // Criar login e trocar senha de outra pessoa exige a service_role key, que ignora o RLS e por
